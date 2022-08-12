@@ -39,6 +39,7 @@ jobs:
         uses: docker/build-push-action@v3
         with:
           context: .
+          file: ./dockerfiles/Dockerfile.gunicorn
           push: ${{ github.event_name == 'push' }} # Push image only on master
           tags: 'eu.gcr.io/tree-266510/titiler:${{ github.sha }},eu.gcr.io/tree-266510/titiler:stage'
 
