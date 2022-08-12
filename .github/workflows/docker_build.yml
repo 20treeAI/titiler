@@ -43,11 +43,11 @@ jobs:
           push: ${{ github.event_name == 'push' }} # Push image only on master
           tags: 'eu.gcr.io/tree-266510/titiler:${{ github.sha }},eu.gcr.io/tree-266510/titiler:stage'
 
-      # - if: github.event_name == 'push'
-      #   name: Deploy to Cloud Run
-      #   uses: google-github-actions/deploy-cloudrun@v0.10.0
-      #   with:
-      #     service: stage-app-titiler
-      #     region: europe-west4
-      #     image: 'eu.gcr.io/tree-266510/titiler:${{ github.sha }}'
-      #     credentials: ${{ secrets.CLOUDRUN_DEPLOYER_SERVICEACCOUNT_KEY }}
+      - if: github.event_name == 'push'
+        name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v0.10.0
+        with:
+          service: stage-app-titiler
+          region: europe-west4
+          image: 'eu.gcr.io/tree-266510/titiler:${{ github.sha }}'
+          credentials: ${{ secrets.CLOUDRUN_DEPLOYER_SERVICEACCOUNT_KEY }}
