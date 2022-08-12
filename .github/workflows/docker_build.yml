@@ -1,0 +1,52 @@
+name: docker-build
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the master branch
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - if: github.event_name == 'push' # Configure gcloud only on push events
+        name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0.6.0
+        with:
+          project_id: 'tree-266510'
+          service_account_key: ${{ secrets.GCR_RW_SERVICEACCOUNT_KEY }}
+          export_default_credentials: true
+
+      - if: github.event_name == 'push' # Configure gcloud only on push events
+        name: Use gcloud CLI
+        run: gcloud auth configure-docker
+
+      - name: Build and push to staging
+        id: docker_build
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }} # Push image only on master
+          tags: 'eu.gcr.io/tree-266510/titiler:${{ github.sha }},eu.gcr.io/tree-266510/titiler:stage'
+
+      # - if: github.event_name == 'push'
+      #   name: Deploy to Cloud Run
+      #   uses: google-github-actions/deploy-cloudrun@v0.10.0
+      #   with:
+      #     service: stage-app-titiler
+      #     region: europe-west4
+      #     image: 'eu.gcr.io/tree-266510/titiler:${{ github.sha }}'
+      #     credentials: ${{ secrets.CLOUDRUN_DEPLOYER_SERVICEACCOUNT_KEY }}
