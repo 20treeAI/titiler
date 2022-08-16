@@ -1,8 +1,9 @@
 # Dockerfile for running titiler application with uvicorn server
 # Size ~600MB
-ARG PYTHON_VERSION=3.9
-
-FROM python:${PYTHON_VERSION}-slim
+# R: the one being run for us
+#ARG PYTHON_VERSION=3.9
+#FROM python:${PYTHON_VERSION}-slim
+FROM python:python:3.11-rc-slim
 
 RUN apt-get update && apt-get install curl -y
 
