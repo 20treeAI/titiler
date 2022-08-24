@@ -14,7 +14,8 @@ from rio_tiler.models import BandStatistics, Bounds, Info
 from rio_tiler.types import ColorMapType
 from rio_tiler.utils import get_array_statistics
 
-from pydash import strings as pystr
+#todo
+#from pydash import strings as pystr
 
 from titiler.core.dependencies import (
     AssetsBidxExprParams,
@@ -621,7 +622,7 @@ class TilerFactory(BaseTilerFactory):
                         "bounds": src_dst.geographic_bounds,
                         "minzoom": minzoom if minzoom is not None else src_dst.minzoom,
                         "maxzoom": maxzoom if maxzoom is not None else src_dst.maxzoom,
-                        "tiles": [pystr.escape(tiles_url)],
+                        "tiles": [tiles_url],
                     }
 
     def wmts(self):  # noqa: C901
@@ -707,14 +708,14 @@ class TilerFactory(BaseTilerFactory):
             return templates.TemplateResponse(
                 "wmts.xml",
                 {
-                    "request": pystr.escape(request),
-                    "tiles_endpoint": pystr.escape(tiles_url),
-                    "bounds": pystr.escape(bounds),
-                    "tileMatrix": pystr.escape(tileMatrix),
-                    "tms": pystr.escape(tms),
+                    "request": request,
+                    "tiles_endpoint": tiles_url,
+                    "bounds":bounds,
+                    "tileMatrix": tileMatrix,
+                    "tms": tms,
                     "title": "Cloud Optimized GeoTIFF",
                     "layer_name": "cogeo",
-                    "media_type": pystr.escape(tile_format.mediatype),
+                    "media_type": tile_format.mediatype,
                 },
                 media_type=MediaType.xml.value,
             )
