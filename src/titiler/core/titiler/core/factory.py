@@ -14,9 +14,6 @@ from rio_tiler.models import BandStatistics, Bounds, Info
 from rio_tiler.types import ColorMapType
 from rio_tiler.utils import get_array_statistics
 
-#todo
-#from pydash import strings as pystr
-
 from titiler.core.dependencies import (
     AssetsBidxExprParams,
     AssetsBidxExprParamsOptional,
@@ -704,13 +701,13 @@ class TilerFactory(BaseTilerFactory):
                             <MatrixHeight>{matrix.matrixHeight}</MatrixHeight>
                         </TileMatrix>"""
                 tileMatrix.append(tm)
-            
+
             return templates.TemplateResponse(
                 "wmts.xml",
                 {
                     "request": request,
                     "tiles_endpoint": tiles_url,
-                    "bounds":bounds,
+                    "bounds": bounds,
                     "tileMatrix": tileMatrix,
                     "tms": tms,
                     "title": "Cloud Optimized GeoTIFF",

@@ -12,7 +12,6 @@ inst_reqs = [
     "numpy",
     "pydantic",
     "rasterio",
-    #"rio-tiler>=3.1,<3.2",
     "rio-tiler @ git+https://github.com/20treeAI/rio-tiler.git@patch_boto3#egg=rio-tiler-3.1.6.ov1",
     "simplejson",
     "importlib_resources>=1.1.0;python_version<'3.9'",
