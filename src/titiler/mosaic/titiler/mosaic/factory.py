@@ -382,12 +382,12 @@ class MosaicTilerFactory(BaseTilerFactory):
                 "maxzoom",
             ]
             qs = [
-                (key, value)
+                (quote(key), quote(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]
             if qs:
-                tiles_url += f"?{urlencode(quote(qs))}"
+                tiles_url += f"?{urlencode(qs)}"
 
             with rasterio.Env(**env):
                 with self.reader(
@@ -461,12 +461,12 @@ class MosaicTilerFactory(BaseTilerFactory):
                 "request",
             ]
             qs = [
-                (key, value)
+                (quote(key), quote(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]
             if qs:
-                tiles_url += f"?{urlencode(quote(qs))}"
+                tiles_url += f"?{urlencode(qs)}"
 
             with rasterio.Env(**env):
                 with self.reader(
