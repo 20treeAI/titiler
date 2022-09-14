@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Type, Union
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 import rasterio
 from cogeo_mosaic.backends import BaseBackend, MosaicBackend
@@ -387,7 +387,7 @@ class MosaicTilerFactory(BaseTilerFactory):
                 if key.lower() not in qs_key_to_remove
             ]
             if qs:
-                tiles_url += f"?{urlencode(qs)}"
+                tiles_url += f"?{urlencode(quote(qs))}"
 
             with rasterio.Env(**env):
                 with self.reader(
@@ -466,7 +466,7 @@ class MosaicTilerFactory(BaseTilerFactory):
                 if key.lower() not in qs_key_to_remove
             ]
             if qs:
-                tiles_url += f"?{urlencode(qs)}"
+                tiles_url += f"?{urlencode(quote(qs))}"
 
             with rasterio.Env(**env):
                 with self.reader(

@@ -3,7 +3,7 @@
 import abc
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 import rasterio
 from geojson_pydantic.features import Feature, FeatureCollection
@@ -611,7 +611,7 @@ class TilerFactory(BaseTilerFactory):
                 if key.lower() not in qs_key_to_remove
             ]
             if qs:
-                tiles_url += f"?{urlencode(qs)}"
+                tiles_url += f"?{urlencode(quote(qs))}"
 
             with rasterio.Env(**env):
                 with self.reader(src_path, tms=tms, **reader_params) as src_dst:
@@ -679,7 +679,7 @@ class TilerFactory(BaseTilerFactory):
                 if key.lower() not in qs_key_to_remove
             ]
             if qs:
-                tiles_url += f"?{urlencode(qs)}"
+                tiles_url += f"?{urlencode(quote(qs))}"
 
             with rasterio.Env(**env):
                 with self.reader(src_path, tms=tms, **reader_params) as src_dst:
