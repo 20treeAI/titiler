@@ -382,7 +382,7 @@ class MosaicTilerFactory(BaseTilerFactory):
                 "maxzoom",
             ]
             qs = [
-                (quote(key), quote(value))
+                (key, quote(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]
@@ -461,7 +461,7 @@ class MosaicTilerFactory(BaseTilerFactory):
                 "request",
             ]
             qs = [
-                (quote(key), quote(value))
+                (key, quote(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]
