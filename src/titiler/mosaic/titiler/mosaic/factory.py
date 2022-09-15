@@ -3,7 +3,8 @@
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Type, Union
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode
+import html
 
 import rasterio
 from cogeo_mosaic.backends import BaseBackend, MosaicBackend
@@ -382,7 +383,7 @@ class MosaicTilerFactory(BaseTilerFactory):
                 "maxzoom",
             ]
             qs = [
-                (quote(key), quote(value))
+                (key, html.escape(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]
@@ -461,7 +462,7 @@ class MosaicTilerFactory(BaseTilerFactory):
                 "request",
             ]
             qs = [
-                (quote(key), quote(value))
+                (key, html.escape(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]

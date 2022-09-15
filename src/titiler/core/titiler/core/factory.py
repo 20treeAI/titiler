@@ -3,7 +3,8 @@
 import abc
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode
+import html
 
 import rasterio
 from geojson_pydantic.features import Feature, FeatureCollection
@@ -606,7 +607,7 @@ class TilerFactory(BaseTilerFactory):
                 "maxzoom",
             ]
             qs = [
-                (quote(key), quote(value))
+                (key, html.escape(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]
@@ -674,7 +675,7 @@ class TilerFactory(BaseTilerFactory):
                 "request",
             ]
             qs = [
-                (quote(key), quote(value))
+                (key, html.escape(value))
                 for (key, value) in request.query_params._list
                 if key.lower() not in qs_key_to_remove
             ]
