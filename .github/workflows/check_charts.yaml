@@ -60,7 +60,7 @@ jobs:
         if: steps.list-changed.outputs.changed == 'true'
         with:
           # See https://github.com/developmentseed/titiler/discussions/387
-          platforms: linux/amd64
+          # platforms: linux/amd64
           context: .
           file: dockerfiles/Dockerfile.uvicorn
           push: false
