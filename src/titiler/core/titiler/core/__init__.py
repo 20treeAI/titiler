@@ -1,8 +1,8 @@
 """titiler.core"""
 
-__version__ = "0.7.0"
+__version__ = "0.11.5"
 
-from . import dependencies, errors, factory, routing, utils  # noqa
+from . import dependencies, errors, factory, routing  # noqa
 from .factory import (  # noqa
     BaseTilerFactory,
     MultiBandTilerFactory,

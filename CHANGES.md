@@ -1,10 +1,162 @@
 # Release Notes
 
-## Unreleased
+## 0.11.5 (2023-03-22)
+
+* fix `TerrainRGB` (change interval from `1.0` to `0.1`)
+
+## 0.11.4 (2023-03-20)
+
+* set FastAPI version lower than 0.95 (https://github.com/tiangolo/fastapi/discussions/9278)
+
+## 0.11.3 (2023-03-14)
+
+* handle dateline crossing dataset in COG/STAC Viewer
+* update Factories `url_for` method to make sure we return a string (https://github.com/developmentseed/titiler/pull/607)
+
+## 0.11.2 (2023-03-08)
+
+* Add OSM background in `/map` viewer when using WebMercator TMS
+
+## 0.11.1 (2023-03-01)
+
+* no change since 0.11.1a0
+
+## 0.11.1a0 (2023-03-01)
+
+* switch to `hatch` and `pdm-pep517` as build system and use `pyproject.toml` for python module metadata
+* switch to `ruff` for python linting
+* update pre-commit configuration
+* documentation fixes 🙏 (authors @jthetzel, @neilsh)
+* fix documentation about `asset_bidx`
+
+### titiler.core
+
+* Algorithm change, make terrainrgb interval and baseval floats to support more quantizers (author @AndrewAnnex, https://github.com/developmentseed/titiler/pull/587)
+* update `rio-tiler` minimum version to `4.1.6`
+* Apply colormap before defining image output format (when not provided)
+
+### titiler.mosaic
+
+* Apply colormap before defining image output format (when not provided)
+
+## 0.11.0 (2023-01-27)
+
+* add `titiler.extensions` package (`cogValidateExtension`, `stacExtension`, `cogViewerExtension`,  `stacViewerExtension`, `wmsExtension`)
+
+### titiler.mosaic
+
+* update `cogeo-mosaic` version requirement to `>=5.0,<5.2` (allow using `az://` prefix from uri)
+* add `MOSAIC_STRICT_ZOOM` environment variable to control if the application should allow fetching tiles outside mosaic min/max zooms
+
+**breaking change**
+
+### titiler.core
+
+* add `extensions` option to the `BaseTilerFactory` to specify a list of extension we want to register. Each extension will be then registered in the `__post_init__` object creation step.
+* remove `BaseHTTPMiddleware` class inheritance for middleware (write pure ASGI middleware)
+
+### titiler.application
+
+* uses Extension to add more endpoints to default `titiler.core` factories
+* move all `viewer` code into `titiler.extensions`
+* add `/cog/stac` endpoint from `titiler.extension.stacExtension` to create STAC Items from raster dataset
+
+### titiler.mosaic
+
+* removed deprecated *empty* path (`/` is the correct route path, which enable prefixed and non-prefixed mosaic application)
+
+## 0.10.2 (2022-12-17)
+
+* fix issue with new morecantile version
+* replace path parameter in `router_prefix` in `BaseTilerFactory.url_for`
+
+## 0.10.1 (2022-12-15)
+
+* update `/map` endpoint and template to support multiple TMS (https://github.com/developmentseed/titiler/pull/560)
+
+## 0.10.0 (2022-12-09)
+
+**breaking change**
+
+* Simplify dependency requirements for titiler.mosaic and titiler.application and using `=={currentVersion}`
+
+### titiler.core
+
+* fix the `wmts.xml` template to work with non-epsg based CRS
+
+### titiler.application
+
+* fix titiler.application viewer when using dataset with band name in metadata
+
+## 0.9.0 (2022-12-05)
+
+### titiler.core
+
+* add `default_tms` in `BaseTilerFactory` to set the default TMS identifier supported by the tiler (e.g `WebMercatorQuad`)
+
+## 0.8.1 (2022-12-01)
+
+### titiler.core
+
+* remove useless `titiler.core.version` file
+
+## 0.8.0 (2022-12-01)
+
+* remove python 3.7 support
+* add python 3.10 and 3.11 in CI
+
+### titiler.core
+
+* update FastAPI requirement to `>=0.87`
+* update rio-tiler requirement to `>=4.1,<4.2`
+* remove `rescale` and `color_formula` from the `post_process` dependency
+* add `algorithm` support and introduce new `algorithm` and `algorithm_params` query parameters
+
+**breaking changes**
+
+* remove `timing headers` and `titiler.core.utils` submodule
+* remove `asset_expression` (except in `/asset_statistics` endpoint) (see https://cogeotiff.github.io/rio-tiler/v4_migration/#multibasereader-expressions)
+* update Point output model to include `band_names`
+* histogram and info band names are prefixed with `b` (e.g `b1`) (ref: https://cogeotiff.github.io/rio-tiler/v4_migration/#band-names)
+* add `/map` endpoint in TilerFactory to display tiles given query-parameters
+* remove `TMSParams` and `WebMercatorTMSParams` dependencies.
+* replace `TilerFactory.tms_dependency` attribute by `TilerFactory.supported_tms`. This attribute gets a `morecantile.defaults.TileMatrixSets` store and will create the tms dependencies dynamically
+* replace `TMSFactory.tms_dependency` attribute by `TMSFactory.supported_tms`. This attribute gets a `morecantile.defaults.TileMatrixSets` store and will create the tms dependencies dynamically
+* move `stats_dependency` and `histogram_dependency` from `BaseTilerFactory` to `TilerFactory`
+* per rio-tiler changes, `;` has be to used in expression to indicate multiple bands. `b1*2,b2+b3,b1/b3` -> `b1*2;b2+b3;b1/b3`
+
+### titiler.mosaic
+
+* update cogeo-mosaic requirement to `>=4.2,<4.3`
+
+**breaking changes**
+
+* remove `timing headers`
+* replace `MosaicTilerFactory.tms_dependency` attribute by `MosaicTilerFactory.supported_tms`. This attribute gets a `morecantile.defaults.TileMatrixSets` store and will create the tms dependencies dynamically
+
+### titiler.application
+
+* code simplification by removing custom code and submodules from endpoints
+
+**breaking changes**
+
+* remove custom TMS and custom Colormap dependencies
+* remove middleware submodule
+
+
+## 0.7.1 (2022-09-21)
 
 ### titiler.mosaic
 
 * add `pixel_selection_dependency` options in `MosaicTilerFactory` to allow default method override (author @samn, https://github.com/developmentseed/titiler/pull/495)
+
+### titiler.application
+
+* allow `interval` colormaps in titiler.application
+
+### Helm charts
+
+* Check Charts workflow added for the Helm charts testing (author @emmanuelmathot, https://github.com/developmentseed/titiler/pull/495)
 
 ## 0.7.0 (2022-06-08)
 

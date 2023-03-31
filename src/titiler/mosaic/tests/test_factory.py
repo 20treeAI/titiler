@@ -5,23 +5,21 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Callable, Optional
+from typing import Optional
 
 import attr
 import numpy
 from cogeo_mosaic.backends import FileBackend
 from cogeo_mosaic.mosaic import MosaicJSON
+from fastapi import FastAPI
+from starlette.testclient import TestClient
 
-from titiler.core.dependencies import DefaultDependency, WebMercatorTMSParams
+from titiler.core.dependencies import DefaultDependency
 from titiler.core.resources.enums import OptionalHeader
 from titiler.mosaic.factory import MosaicTilerFactory
 from titiler.mosaic.resources.enums import PixelSelectionMethod
 
 from .conftest import DATA_DIR
-
-from fastapi import FastAPI
-
-from starlette.testclient import TestClient
 
 assets = [os.path.join(DATA_DIR, asset) for asset in ["cog1.tif", "cog2.tif"]]
 
@@ -44,11 +42,10 @@ def tmpmosaic():
 def test_MosaicTilerFactory():
     """Test MosaicTilerFactory class."""
     mosaic = MosaicTilerFactory(
-        optional_headers=[OptionalHeader.server_timing, OptionalHeader.x_assets],
+        optional_headers=[OptionalHeader.x_assets],
         router_prefix="mosaic",
     )
-    assert len(mosaic.router.routes) == 22
-    assert mosaic.tms_dependency == WebMercatorTMSParams
+    assert len(mosaic.router.routes) == 23
 
     app = FastAPI()
     app.include_router(mosaic.router, prefix="/mosaic")
@@ -96,18 +93,10 @@ def test_MosaicTilerFactory():
             params={"url": mosaic_file},
         )
         assert response.status_code == 200
-        timing = response.headers["server-timing"]
-        assert "mosaicread;dur" in timing
-        assert "dataread;dur" in timing
 
         response = client.get("/mosaic/tiles/7/37/45", params={"url": mosaic_file})
         assert response.status_code == 200
         assert response.headers["X-Assets"]
-        timing = response.headers["server-timing"]
-        assert "mosaicread;dur" in timing
-        assert "dataread;dur" in timing
-        assert "postprocess;dur" in timing
-        assert "format;dur" in timing
 
         # Buffer
         response = client.get(
@@ -257,40 +246,6 @@ def _multiply_by_two(data, mask):
     return data, mask
 
 
-@dataclass
-class ReaderParams(DefaultDependency):
-    """Backend options to overwrite min/max zoom."""
-
-    post_process: Callable = _multiply_by_two
-
-
-def test_MosaicTilerFactory_ReaderParams():
-    """Test MosaicTilerFactory factory with Reader dependency."""
-    mosaic = MosaicTilerFactory(router_prefix="/mosaic")
-    mosaic_two = MosaicTilerFactory(
-        reader_dependency=ReaderParams, router_prefix="/mosaic_two"
-    )
-
-    app = FastAPI()
-    app.include_router(mosaic.router, prefix="/mosaic")
-    app.include_router(mosaic_two.router, prefix="/mosaic_two")
-    client = TestClient(app)
-
-    with tmpmosaic() as mosaic_file:
-        response = client.get(
-            "/mosaic/point/-74.53125,45.9956935",
-            params={"url": mosaic_file},
-        )
-        value = response.json()["values"][0][1][0]
-
-        response = client.get(
-            "/mosaic_two/point/-74.53125,45.9956935",
-            params={"url": mosaic_file},
-        )
-        value_two = response.json()["values"][0][1][0]
-        assert value_two == 2 * value
-
-
 def test_MosaicTilerFactory_PixelSelectionParams():
     """Test MosaicTilerFactory factory with a customized default PixelSelectionMethod."""
     mosaic = MosaicTilerFactory(router_prefix="/mosaic")
@@ -320,3 +275,25 @@ def test_MosaicTilerFactory_PixelSelectionParams():
         assert npy_tile_highest.shape == (4, 256, 256)  # mask + data
 
         assert (npy_tile != npy_tile_highest).any()
+
+
+def test_MosaicTilerFactory_strict_zoom(monkeypatch):
+    """Test MosaicTilerFactory factory with STRICT Zoom Mode"""
+    monkeypatch.setenv("MOSAIC_STRICT_ZOOM", True)
+
+    mosaic = MosaicTilerFactory()
+    app = FastAPI()
+    app.include_router(mosaic.router)
+
+    with TestClient(app) as client:
+        with tmpmosaic() as mosaic_file:
+            response = client.get("/tiles/7/37/45.png", params={"url": mosaic_file})
+            assert response.status_code == 200
+
+            response = client.get("/tiles/6/18/22.png", params={"url": mosaic_file})
+            assert response.status_code == 400
+            assert "Invalid ZOOM level 6" in response.text
+
+            response = client.get("/tiles/11/594/734.png", params={"url": mosaic_file})
+            assert response.status_code == 400
+            assert "Invalid ZOOM level 11" in response.text

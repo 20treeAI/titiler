@@ -2,18 +2,29 @@
 
 import abc
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Type, Union
 from urllib.parse import urlencode
 
 import rasterio
+from fastapi import APIRouter, Body, Depends, Path, Query
+from fastapi.dependencies.utils import get_parameterless_sub_dependant
+from fastapi.params import Depends as DependsFunc
 from geojson_pydantic.features import Feature, FeatureCollection
 from geojson_pydantic.geometries import Polygon
 from morecantile import TileMatrixSet
-from rio_tiler.io import BaseReader, COGReader, MultiBandReader, MultiBaseReader
+from morecantile import tms as morecantile_tms
+from morecantile.defaults import TileMatrixSets
+from rio_tiler.io import BaseReader, MultiBandReader, MultiBaseReader, Reader
 from rio_tiler.models import BandStatistics, Bounds, Info
 from rio_tiler.types import ColorMapType
 from rio_tiler.utils import get_array_statistics
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, Response
+from starlette.routing import Match, compile_path, replace_params
+from starlette.templating import Jinja2Templates
 
+from titiler.core.algorithm import AlgorithmMetadata, Algorithms, BaseAlgorithm
+from titiler.core.algorithm import algorithms as available_algorithms
 from titiler.core.dependencies import (
     AssetsBidxExprParams,
     AssetsBidxExprParamsOptional,
@@ -30,10 +41,8 @@ from titiler.core.dependencies import (
     HistogramParams,
     ImageParams,
     ImageRenderingParams,
-    PostProcessParams,
+    RescalingParams,
     StatisticsParams,
-    TileMatrixSetName,
-    TMSParams,
 )
 from titiler.core.models.mapbox import TileJSON
 from titiler.core.models.OGC import TileMatrixSetList
@@ -41,7 +50,6 @@ from titiler.core.models.responses import (
     InfoGeoJSON,
     MultiBaseInfo,
     MultiBaseInfoGeoJSON,
-    MultiBasePoint,
     MultiBaseStatistics,
     MultiBaseStatisticsGeoJSON,
     Point,
@@ -51,15 +59,6 @@ from titiler.core.models.responses import (
 from titiler.core.resources.enums import ImageType, MediaType, OptionalHeader
 from titiler.core.resources.responses import GeoJSONResponse, JSONResponse, XMLResponse
 from titiler.core.routing import EndpointScope
-from titiler.core.utils import Timer
-
-from fastapi import APIRouter, Body, Depends, Path, Query, params
-from fastapi.dependencies.utils import get_parameterless_sub_dependant
-
-from starlette.requests import Request
-from starlette.responses import Response
-from starlette.routing import Match
-from starlette.templating import Jinja2Templates
 
 try:
     from importlib.resources import files as resources_files  # type: ignore
@@ -90,6 +89,16 @@ img_endpoint_params: Dict[str, Any] = {
 }
 
 
+@dataclass  # type: ignore
+class FactoryExtension(metaclass=abc.ABCMeta):
+    """Factory Extension."""
+
+    @abc.abstractmethod
+    def register(self, factory: "BaseTilerFactory"):
+        """Register extension to the factory."""
+        ...
+
+
 # ref: https://github.com/python/mypy/issues/5374
 @dataclass  # type: ignore
 class BaseTilerFactory(metaclass=abc.ABCMeta):
@@ -98,15 +107,13 @@ class BaseTilerFactory(metaclass=abc.ABCMeta):
     Abstract Base Class which defines most inputs used by dynamic tiler.
 
     Attributes:
-        reader (rio_tiler.io.base.BaseReader): A rio-tiler reader (e.g COGReader).
+        reader (rio_tiler.io.base.BaseReader): A rio-tiler reader (e.g Reader).
         router (fastapi.APIRouter): Application router to register endpoints to.
         path_dependency (Callable): Endpoint dependency defining `path` to pass to the reader init.
         dataset_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining dataset overwriting options (e.g nodata).
         layer_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining dataset indexes/bands/assets options.
         render_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining image rendering options (e.g add_mask).
         colormap_dependency (Callable): Endpoint dependency defining ColorMap options (e.g colormap_name).
-        stats_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining options for rio-tiler's statistics method.
-        histogram_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining options for numpy's histogram method.
         process_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining image post-processing options (e.g rescaling, color-formula).
         tms_dependency (Callable): Endpoint dependency defining TileMatrixSet to use.
         reader_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining BaseReader options.
@@ -134,21 +141,20 @@ class BaseTilerFactory(metaclass=abc.ABCMeta):
     render_dependency: Type[DefaultDependency] = ImageRenderingParams
     colormap_dependency: Callable[..., Optional[ColorMapType]] = ColorMapParams
 
-    # Statistics/Histogram Dependencies
-    stats_dependency: Type[DefaultDependency] = StatisticsParams
-    histogram_dependency: Type[DefaultDependency] = HistogramParams
-
-    # Post Processing Dependencies (rescaling, color-formula)
-    process_dependency: Type[DefaultDependency] = PostProcessParams
-
-    # TileMatrixSet dependency
-    tms_dependency: Callable[..., TileMatrixSet] = TMSParams
+    # Post Processing Dependencies (algorithm)
+    process_dependency: Callable[
+        ..., Optional[BaseAlgorithm]
+    ] = available_algorithms.dependency
 
     # Reader dependency
     reader_dependency: Type[DefaultDependency] = DefaultDependency
 
     # GDAL ENV dependency
-    environment_dependency: Callable[..., Dict] = lambda: dict()
+    environment_dependency: Callable[..., Dict] = field(default=lambda: {})
+
+    # TileMatrixSet dependency
+    supported_tms: TileMatrixSets = morecantile_tms
+    default_tms: str = "WebMercatorQuad"
 
     # Router Prefix is needed to find the path for /tile if the TilerFactory.router is mounted
     # with other router (multiple `.../tile` routes).
@@ -159,14 +165,22 @@ class BaseTilerFactory(metaclass=abc.ABCMeta):
     optional_headers: List[OptionalHeader] = field(default_factory=list)
 
     # add dependencies to specific routes
-    route_dependencies: List[Tuple[List[EndpointScope], List[params.Depends]]] = field(
+    route_dependencies: List[Tuple[List[EndpointScope], List[DependsFunc]]] = field(
         default_factory=list
     )
 
+    extensions: List[FactoryExtension] = field(default_factory=list)
+
     def __post_init__(self):
         """Post Init: register route and configure specific options."""
+        # Register endpoints
         self.register_routes()
 
+        # Register Extensions
+        for ext in self.extensions:
+            ext.register(self)
+
+        # Update endpoints dependencies
         for scopes, dependencies in self.route_dependencies:
             self.add_route_dependencies(scopes=scopes, dependencies=dependencies)
 
@@ -180,14 +194,23 @@ class BaseTilerFactory(metaclass=abc.ABCMeta):
         url_path = self.router.url_path_for(name, **path_params)
         base_url = str(request.base_url)
         if self.router_prefix:
-            base_url += self.router_prefix.lstrip("/")
-        return url_path.make_absolute_url(base_url=base_url)
+            prefix = self.router_prefix.lstrip("/")
+            # If we have prefix with custom path param we check and replace them with
+            # the path params provided
+            if "{" in prefix:
+                _, path_format, param_convertors = compile_path(prefix)
+                prefix, _ = replace_params(
+                    path_format, param_convertors, request.path_params
+                )
+            base_url += prefix
+
+        return str(url_path.make_absolute_url(base_url=base_url))
 
     def add_route_dependencies(
         self,
         *,
         scopes: List[EndpointScope],
-        dependencies=List[params.Depends],
+        dependencies=List[DependsFunc],
     ):
         """Add dependencies to routes.
 
@@ -219,10 +242,25 @@ class BaseTilerFactory(metaclass=abc.ABCMeta):
 
 @dataclass
 class TilerFactory(BaseTilerFactory):
-    """Tiler Factory."""
+    """Tiler Factory.
 
-    # Default reader is set to COGReader
-    reader: Type[BaseReader] = COGReader
+    Attributes:
+        reader (rio_tiler.io.base.BaseReader): A rio-tiler reader. Defaults to `rio_tiler.io.Reader`.
+        stats_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining options for rio-tiler's statistics method.
+        histogram_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining options for numpy's histogram method.
+        img_dependency (titiler.core.dependencies.DefaultDependency): Endpoint dependency defining options for rio-tiler's preview/crop method.
+        add_preview (bool): add `/preview` endpoints. Defaults to True.
+        add_part (bool): add `/crop` endpoints. Defaults to True.
+        add_viewer (bool): add `/map` endpoints. Defaults to True.
+
+    """
+
+    # Default reader is set to rio_tiler.io.Reader
+    reader: Type[BaseReader] = Reader
+
+    # Statistics/Histogram Dependencies
+    stats_dependency: Type[DefaultDependency] = StatisticsParams
+    histogram_dependency: Type[DefaultDependency] = HistogramParams
 
     # Crop/Preview endpoints Dependencies
     img_dependency: Type[DefaultDependency] = ImageParams
@@ -230,6 +268,7 @@ class TilerFactory(BaseTilerFactory):
     # Add/Remove some endpoints
     add_preview: bool = True
     add_part: bool = True
+    add_viewer: bool = True
 
     def register_routes(self):
         """
@@ -256,6 +295,9 @@ class TilerFactory(BaseTilerFactory):
 
         if self.add_part:
             self.part()
+
+        if self.add_viewer:
+            self.map_viewer()
 
     ############################################################################
     # /bounds
@@ -392,22 +434,24 @@ class TilerFactory(BaseTilerFactory):
             env=Depends(self.environment_dependency),
         ):
             """Get Statistics from a geojson feature or featureCollection."""
+            fc = geojson
+            if isinstance(fc, Feature):
+                fc = FeatureCollection(features=[geojson])
+
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
-                    # TODO: stream features for FeatureCollection
-                    if isinstance(geojson, FeatureCollection):
-                        for feature in geojson:
-                            data = src_dst.feature(
-                                feature.dict(exclude_none=True),
-                                **layer_params,
-                                **image_params,
-                                **dataset_params,
-                            )
-                            stats = get_array_statistics(
-                                data.as_masked(),
-                                **stats_params,
-                                **histogram_params,
-                            )
+                    for feature in fc:
+                        data = src_dst.feature(
+                            feature.dict(exclude_none=True),
+                            **layer_params,
+                            **image_params,
+                            **dataset_params,
+                        )
+                        stats = get_array_statistics(
+                            data.as_masked(),
+                            **stats_params,
+                            **histogram_params,
+                        )
 
                         feature.properties = feature.properties or {}
                         feature.properties.update(
@@ -421,32 +465,7 @@ class TilerFactory(BaseTilerFactory):
                             }
                         )
 
-                    else:  # simple feature
-                        data = src_dst.feature(
-                            geojson.dict(exclude_none=True),
-                            **layer_params,
-                            **image_params,
-                            **dataset_params,
-                        )
-                        stats = get_array_statistics(
-                            data.as_masked(),
-                            **stats_params,
-                            **histogram_params,
-                        )
-
-                        geojson.properties = geojson.properties or {}
-                        geojson.properties.update(
-                            {
-                                "statistics": {
-                                    f"{data.band_names[ix]}": BandStatistics(
-                                        **stats[ix]
-                                    )
-                                    for ix in range(len(stats))
-                                }
-                            }
-                        )
-
-                    return geojson
+            return fc.features[0] if isinstance(geojson, Feature) else fc
 
     ############################################################################
     # /tiles
@@ -473,7 +492,10 @@ class TilerFactory(BaseTilerFactory):
             z: int = Path(..., ge=0, le=30, description="TMS tiles's zoom level"),
             x: int = Path(..., description="TMS tiles's column"),
             y: int = Path(..., description="TMS tiles's row"),
-            tms: TileMatrixSet = Depends(self.tms_dependency),
+            TileMatrixSetId: Literal[tuple(self.supported_tms.list())] = Query(
+                self.default_tms,
+                description=f"TileMatrixSet Name (default: '{self.default_tms}')",
+            ),
             scale: int = Query(
                 1, gt=0, lt=4, description="Tile size scale. 1=256x256, 2=512x512..."
             ),
@@ -483,62 +505,61 @@ class TilerFactory(BaseTilerFactory):
             src_path=Depends(self.path_dependency),
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
-            postprocess_params=Depends(self.process_dependency),
-            colormap=Depends(self.colormap_dependency),
-            render_params=Depends(self.render_dependency),
-            tile_buffer: Optional[float] = Query(
+            buffer: Optional[float] = Query(
                 None,
                 gt=0,
-                alias="buffer",
                 title="Tile buffer.",
-                description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * tile_buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
+                description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
             ),
+            post_process=Depends(self.process_dependency),
+            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            color_formula: Optional[str] = Query(
+                None,
+                title="Color Formula",
+                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
+            ),
+            colormap=Depends(self.colormap_dependency),
+            render_params=Depends(self.render_dependency),
             reader_params=Depends(self.reader_dependency),
             env=Depends(self.environment_dependency),
         ):
             """Create map tile from a dataset."""
-            timings = []
-            headers: Dict[str, str] = {}
+            tms = self.supported_tms.get(TileMatrixSetId)
+            with rasterio.Env(**env):
+                with self.reader(src_path, tms=tms, **reader_params) as src_dst:
+                    image = src_dst.tile(
+                        x,
+                        y,
+                        z,
+                        tilesize=scale * 256,
+                        buffer=buffer,
+                        **layer_params,
+                        **dataset_params,
+                    )
+                    dst_colormap = getattr(src_dst, "colormap", None)
 
-            tilesize = scale * 256
+            if post_process:
+                image = post_process(image)
 
-            with Timer() as t:
-                with rasterio.Env(**env):
-                    with self.reader(src_path, tms=tms, **reader_params) as src_dst:
-                        data = src_dst.tile(
-                            x,
-                            y,
-                            z,
-                            tilesize=tilesize,
-                            tile_buffer=tile_buffer,
-                            **layer_params,
-                            **dataset_params,
-                        )
-                        dst_colormap = getattr(src_dst, "colormap", None)
-            timings.append(("dataread", round(t.elapsed * 1000, 2)))
+            if rescale:
+                image.rescale(rescale)
+
+            if color_formula:
+                image.apply_color_formula(color_formula)
+
+            if cmap := colormap or dst_colormap:
+                image = image.apply_colormap(cmap)
 
             if not format:
-                format = ImageType.jpeg if data.mask.all() else ImageType.png
+                format = ImageType.jpeg if image.mask.all() else ImageType.png
 
-            with Timer() as t:
-                image = data.post_process(**postprocess_params)
-            timings.append(("postprocess", round(t.elapsed * 1000, 2)))
+            content = image.render(
+                img_format=format.driver,
+                **format.profile,
+                **render_params,
+            )
 
-            with Timer() as t:
-                content = image.render(
-                    img_format=format.driver,
-                    colormap=colormap or dst_colormap,
-                    **format.profile,
-                    **render_params,
-                )
-            timings.append(("format", round(t.elapsed * 1000, 2)))
-
-            if OptionalHeader.server_timing in self.optional_headers:
-                headers["Server-Timing"] = ", ".join(
-                    [f"{name};dur={time}" for (name, time) in timings]
-                )
-
-            return Response(content, media_type=format.mediatype, headers=headers)
+            return Response(content, media_type=format.mediatype)
 
     def tilejson(self):  # noqa: C901
         """Register /tilejson.json endpoint."""
@@ -557,7 +578,10 @@ class TilerFactory(BaseTilerFactory):
         )
         def tilejson(
             request: Request,
-            tms: TileMatrixSet = Depends(self.tms_dependency),
+            TileMatrixSetId: Literal[tuple(self.supported_tms.list())] = Query(
+                self.default_tms,
+                description=f"TileMatrixSet Name (default: '{self.default_tms}')",
+            ),
             src_path=Depends(self.path_dependency),
             tile_format: Optional[ImageType] = Query(
                 None, description="Output image type. Default is auto."
@@ -573,16 +597,23 @@ class TilerFactory(BaseTilerFactory):
             ),
             layer_params=Depends(self.layer_dependency),  # noqa
             dataset_params=Depends(self.dataset_dependency),  # noqa
-            postprocess_params=Depends(self.process_dependency),  # noqa
-            colormap=Depends(self.colormap_dependency),  # noqa
-            render_params=Depends(self.render_dependency),  # noqa
-            tile_buffer: Optional[float] = Query(  # noqa
+            buffer: Optional[float] = Query(  # noqa
                 None,
                 gt=0,
-                alias="buffer",
                 title="Tile buffer.",
-                description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * tile_buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
+                description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
             ),
+            post_process=Depends(self.process_dependency),  # noqa
+            rescale: Optional[List[Tuple[float, ...]]] = Depends(
+                RescalingParams
+            ),  # noqa
+            color_formula: Optional[str] = Query(  # noqa
+                None,
+                title="Color Formula",
+                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
+            ),
+            colormap=Depends(self.colormap_dependency),  # noqa
+            render_params=Depends(self.render_dependency),  # noqa
             reader_params=Depends(self.reader_dependency),
             env=Depends(self.environment_dependency),
         ):
@@ -592,7 +623,7 @@ class TilerFactory(BaseTilerFactory):
                 "x": "{x}",
                 "y": "{y}",
                 "scale": tile_scale,
-                "TileMatrixSetId": tms.identifier,
+                "TileMatrixSetId": TileMatrixSetId,
             }
             if tile_format:
                 route_params["format"] = tile_format.value
@@ -613,6 +644,7 @@ class TilerFactory(BaseTilerFactory):
             if qs:
                 tiles_url += f"?{urlencode(qs)}"
 
+            tms = self.supported_tms.get(TileMatrixSetId)
             with rasterio.Env(**env):
                 with self.reader(src_path, tms=tms, **reader_params) as src_dst:
                     return {
@@ -621,6 +653,71 @@ class TilerFactory(BaseTilerFactory):
                         "maxzoom": maxzoom if maxzoom is not None else src_dst.maxzoom,
                         "tiles": [tiles_url],
                     }
+
+    def map_viewer(self):  # noqa: C901
+        """Register /map endpoint."""
+
+        @self.router.get("/map", response_class=HTMLResponse)
+        @self.router.get("/{TileMatrixSetId}/map", response_class=HTMLResponse)
+        def map_viewer(
+            request: Request,
+            src_path=Depends(self.path_dependency),
+            TileMatrixSetId: Literal[tuple(self.supported_tms.list())] = Query(
+                self.default_tms,
+                description=f"TileMatrixSet Name (default: '{self.default_tms}')",
+            ),  # noqa
+            tile_format: Optional[ImageType] = Query(
+                None, description="Output image type. Default is auto."
+            ),  # noqa
+            tile_scale: int = Query(
+                1, gt=0, lt=4, description="Tile size scale. 1=256x256, 2=512x512..."
+            ),  # noqa
+            minzoom: Optional[int] = Query(
+                None, description="Overwrite default minzoom."
+            ),  # noqa
+            maxzoom: Optional[int] = Query(
+                None, description="Overwrite default maxzoom."
+            ),  # noqa
+            layer_params=Depends(self.layer_dependency),  # noqa
+            dataset_params=Depends(self.dataset_dependency),  # noqa
+            buffer: Optional[float] = Query(  # noqa
+                None,
+                gt=0,
+                title="Tile buffer.",
+                description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
+            ),
+            post_process=Depends(self.process_dependency),  # noqa
+            rescale: Optional[List[Tuple[float, ...]]] = Depends(
+                RescalingParams
+            ),  # noqa
+            color_formula: Optional[str] = Query(  # noqa
+                None,
+                title="Color Formula",
+                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
+            ),
+            colormap=Depends(self.colormap_dependency),  # noqa
+            render_params=Depends(self.render_dependency),  # noqa
+            reader_params=Depends(self.reader_dependency),  # noqa
+            env=Depends(self.environment_dependency),  # noqa
+        ):
+            """Return TileJSON document for a dataset."""
+            tilejson_url = self.url_for(
+                request, "tilejson", TileMatrixSetId=TileMatrixSetId
+            )
+            if request.query_params._list:
+                tilejson_url += f"?{urlencode(request.query_params._list)}"
+
+            tms = self.supported_tms.get(TileMatrixSetId)
+            return templates.TemplateResponse(
+                name="index.html",
+                context={
+                    "request": request,
+                    "tilejson_endpoint": tilejson_url,
+                    "tms": tms,
+                    "resolutions": [tms._resolution(matrix) for matrix in tms],
+                },
+                media_type="text/html",
+            )
 
     def wmts(self):  # noqa: C901
         """Register /wmts endpoint."""
@@ -631,7 +728,10 @@ class TilerFactory(BaseTilerFactory):
         )
         def wmts(
             request: Request,
-            tms: TileMatrixSet = Depends(self.tms_dependency),
+            TileMatrixSetId: Literal[tuple(self.supported_tms.list())] = Query(
+                self.default_tms,
+                description=f"TileMatrixSet Name (default: '{self.default_tms}')",
+            ),
             src_path=Depends(self.path_dependency),
             tile_format: ImageType = Query(
                 ImageType.png, description="Output image type. Default is png."
@@ -647,7 +747,21 @@ class TilerFactory(BaseTilerFactory):
             ),
             layer_params=Depends(self.layer_dependency),  # noqa
             dataset_params=Depends(self.dataset_dependency),  # noqa
-            postprocess_params=Depends(self.process_dependency),  # noqa
+            buffer: Optional[float] = Query(  # noqa
+                None,
+                gt=0,
+                title="Tile buffer.",
+                description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
+            ),
+            post_process=Depends(self.process_dependency),  # noqa
+            rescale: Optional[List[Tuple[float, ...]]] = Depends(
+                RescalingParams
+            ),  # noqa
+            color_formula: Optional[str] = Query(  # noqa
+                None,
+                title="Color Formula",
+                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
+            ),
             colormap=Depends(self.colormap_dependency),  # noqa
             render_params=Depends(self.render_dependency),  # noqa
             reader_params=Depends(self.reader_dependency),
@@ -660,7 +774,7 @@ class TilerFactory(BaseTilerFactory):
                 "y": "{TileRow}",
                 "scale": tile_scale,
                 "format": tile_format.value,
-                "TileMatrixSetId": tms.identifier,
+                "TileMatrixSetId": TileMatrixSetId,
             }
             tiles_url = self.url_for(request, "tile", **route_params)
 
@@ -681,6 +795,7 @@ class TilerFactory(BaseTilerFactory):
             if qs:
                 tiles_url += f"?{urlencode(qs)}"
 
+            tms = self.supported_tms.get(TileMatrixSetId)
             with rasterio.Env(**env):
                 with self.reader(src_path, tms=tms, **reader_params) as src_dst:
                     bounds = src_dst.geographic_bounds
@@ -730,7 +845,6 @@ class TilerFactory(BaseTilerFactory):
             responses={200: {"description": "Return a value for a point"}},
         )
         def point(
-            response: Response,
             lon: float = Path(..., description="Longitude"),
             lat: float = Path(..., description="Latitude"),
             src_path=Depends(self.path_dependency),
@@ -740,25 +854,20 @@ class TilerFactory(BaseTilerFactory):
             env=Depends(self.environment_dependency),
         ):
             """Get Point value for a dataset."""
-            timings = []
+            with rasterio.Env(**env):
+                with self.reader(src_path, **reader_params) as src_dst:
+                    pts = src_dst.point(
+                        lon,
+                        lat,
+                        **layer_params,
+                        **dataset_params,
+                    )
 
-            with Timer() as t:
-                with rasterio.Env(**env):
-                    with self.reader(src_path, **reader_params) as src_dst:
-                        values = src_dst.point(
-                            lon,
-                            lat,
-                            **layer_params,
-                            **dataset_params,
-                        )
-            timings.append(("dataread", round(t.elapsed * 1000, 2)))
-
-            if OptionalHeader.server_timing in self.optional_headers:
-                response.headers["Server-Timing"] = ", ".join(
-                    [f"{name};dur={time}" for (name, time) in timings]
-                )
-
-            return {"coordinates": [lon, lat], "values": values}
+            return {
+                "coordinates": [lon, lat],
+                "values": pts.data.tolist(),
+                "band_names": pts.band_names,
+            }
 
     ############################################################################
     # /preview (Optional)
@@ -776,54 +885,55 @@ class TilerFactory(BaseTilerFactory):
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
             img_params=Depends(self.img_dependency),
-            postprocess_params=Depends(self.process_dependency),
+            post_process=Depends(self.process_dependency),
+            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            color_formula: Optional[str] = Query(
+                None,
+                title="Color Formula",
+                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
+            ),
             colormap=Depends(self.colormap_dependency),
             render_params=Depends(self.render_dependency),
             reader_params=Depends(self.reader_dependency),
             env=Depends(self.environment_dependency),
         ):
             """Create preview of a dataset."""
-            timings = []
-            headers: Dict[str, str] = {}
+            with rasterio.Env(**env):
+                with self.reader(src_path, **reader_params) as src_dst:
+                    image = src_dst.preview(
+                        **layer_params,
+                        **img_params,
+                        **dataset_params,
+                    )
+                    dst_colormap = getattr(src_dst, "colormap", None)
 
-            with Timer() as t:
-                with rasterio.Env(**env):
-                    with self.reader(src_path, **reader_params) as src_dst:
-                        data = src_dst.preview(
-                            **layer_params,
-                            **img_params,
-                            **dataset_params,
-                        )
-                        dst_colormap = getattr(src_dst, "colormap", None)
-            timings.append(("dataread", round(t.elapsed * 1000, 2)))
+            if post_process:
+                image = post_process(image)
+
+            if rescale:
+                image.rescale(rescale)
+
+            if color_formula:
+                image.apply_color_formula(color_formula)
+
+            if cmap := colormap or dst_colormap:
+                image = image.apply_colormap(cmap)
 
             if not format:
-                format = ImageType.jpeg if data.mask.all() else ImageType.png
+                format = ImageType.jpeg if image.mask.all() else ImageType.png
 
-            with Timer() as t:
-                image = data.post_process(**postprocess_params)
-            timings.append(("postprocess", round(t.elapsed * 1000, 2)))
+            content = image.render(
+                img_format=format.driver,
+                **format.profile,
+                **render_params,
+            )
 
-            with Timer() as t:
-                content = image.render(
-                    img_format=format.driver,
-                    colormap=colormap or dst_colormap,
-                    **format.profile,
-                    **render_params,
-                )
-            timings.append(("format", round(t.elapsed * 1000, 2)))
-
-            if OptionalHeader.server_timing in self.optional_headers:
-                headers["Server-Timing"] = ", ".join(
-                    [f"{name};dur={time}" for (name, time) in timings]
-                )
-
-            return Response(content, media_type=format.mediatype, headers=headers)
+            return Response(content, media_type=format.mediatype)
 
     ############################################################################
     # /crop (Optional)
     ############################################################################
-    def part(self):
+    def part(self):  # noqa: C901
         """Register /crop endpoint."""
 
         # GET endpoints
@@ -845,47 +955,48 @@ class TilerFactory(BaseTilerFactory):
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
             image_params=Depends(self.img_dependency),
-            postprocess_params=Depends(self.process_dependency),
+            post_process=Depends(self.process_dependency),
+            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            color_formula: Optional[str] = Query(
+                None,
+                title="Color Formula",
+                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
+            ),
             colormap=Depends(self.colormap_dependency),
             render_params=Depends(self.render_dependency),
             reader_params=Depends(self.reader_dependency),
             env=Depends(self.environment_dependency),
         ):
             """Create image from part of a dataset."""
-            timings = []
-            headers: Dict[str, str] = {}
+            with rasterio.Env(**env):
+                with self.reader(src_path, **reader_params) as src_dst:
+                    image = src_dst.part(
+                        [minx, miny, maxx, maxy],
+                        **layer_params,
+                        **image_params,
+                        **dataset_params,
+                    )
+                    dst_colormap = getattr(src_dst, "colormap", None)
 
-            with Timer() as t:
-                with rasterio.Env(**env):
-                    with self.reader(src_path, **reader_params) as src_dst:
-                        data = src_dst.part(
-                            [minx, miny, maxx, maxy],
-                            **layer_params,
-                            **image_params,
-                            **dataset_params,
-                        )
-                        dst_colormap = getattr(src_dst, "colormap", None)
-            timings.append(("dataread", round(t.elapsed * 1000, 2)))
+            if post_process:
+                image = post_process(image)
 
-            with Timer() as t:
-                image = data.post_process(**postprocess_params)
-            timings.append(("postprocess", round(t.elapsed * 1000, 2)))
+            if rescale:
+                image.rescale(rescale)
 
-            with Timer() as t:
-                content = image.render(
-                    img_format=format.driver,
-                    colormap=colormap or dst_colormap,
-                    **format.profile,
-                    **render_params,
-                )
-            timings.append(("format", round(t.elapsed * 1000, 2)))
+            if color_formula:
+                image.apply_color_formula(color_formula)
 
-            if OptionalHeader.server_timing in self.optional_headers:
-                headers["Server-Timing"] = ", ".join(
-                    [f"{name};dur={time}" for (name, time) in timings]
-                )
+            if cmap := colormap or dst_colormap:
+                image = image.apply_colormap(cmap)
 
-            return Response(content, media_type=format.mediatype, headers=headers)
+            content = image.render(
+                img_format=format.driver,
+                **format.profile,
+                **render_params,
+            )
+
+            return Response(content, media_type=format.mediatype)
 
         # POST endpoints
         @self.router.post(
@@ -909,50 +1020,51 @@ class TilerFactory(BaseTilerFactory):
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
             image_params=Depends(self.img_dependency),
-            postprocess_params=Depends(self.process_dependency),
+            post_process=Depends(self.process_dependency),
+            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            color_formula: Optional[str] = Query(
+                None,
+                title="Color Formula",
+                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
+            ),
             colormap=Depends(self.colormap_dependency),
             render_params=Depends(self.render_dependency),
             reader_params=Depends(self.reader_dependency),
             env=Depends(self.environment_dependency),
         ):
             """Create image from a geojson feature."""
-            timings = []
-            headers: Dict[str, str] = {}
+            with rasterio.Env(**env):
+                with self.reader(src_path, **reader_params) as src_dst:
+                    image = src_dst.feature(
+                        geojson.dict(exclude_none=True),
+                        **layer_params,
+                        **image_params,
+                        **dataset_params,
+                    )
+                    dst_colormap = getattr(src_dst, "colormap", None)
 
-            with Timer() as t:
-                with rasterio.Env(**env):
-                    with self.reader(src_path, **reader_params) as src_dst:
-                        data = src_dst.feature(
-                            geojson.dict(exclude_none=True),
-                            **layer_params,
-                            **image_params,
-                            **dataset_params,
-                        )
-                        dst_colormap = getattr(src_dst, "colormap", None)
-            timings.append(("dataread", round(t.elapsed * 1000, 2)))
+            if post_process:
+                image = post_process(image)
 
-            with Timer() as t:
-                image = data.post_process(**postprocess_params)
-            timings.append(("postprocess", round(t.elapsed * 1000, 2)))
+            if rescale:
+                image.rescale(rescale)
+
+            if color_formula:
+                image.apply_color_formula(color_formula)
+
+            if cmap := colormap or dst_colormap:
+                image = image.apply_colormap(cmap)
 
             if not format:
-                format = ImageType.jpeg if data.mask.all() else ImageType.png
+                format = ImageType.jpeg if image.mask.all() else ImageType.png
 
-            with Timer() as t:
-                content = image.render(
-                    img_format=format.driver,
-                    colormap=colormap or dst_colormap,
-                    **format.profile,
-                    **render_params,
-                )
-            timings.append(("format", round(t.elapsed * 1000, 2)))
+            content = image.render(
+                img_format=format.driver,
+                **format.profile,
+                **render_params,
+            )
 
-            if OptionalHeader.server_timing in self.optional_headers:
-                headers["Server-Timing"] = ", ".join(
-                    [f"{name};dur={time}" for (name, time) in timings]
-                )
-
-            return Response(content, media_type=format.mediatype, headers=headers)
+            return Response(content, media_type=format.mediatype)
 
 
 @dataclass
@@ -965,7 +1077,7 @@ class MultiBaseTilerFactory(TilerFactory):
         .tile(), .point(), .preview() and the .part() methods will receive assets, expression or indexes arguments.
 
         The rio_tiler.io.MultiBaseReader  `.info()` and `.metadata()` have `assets` as
-        a requirement arguments (https://github.com/cogeotiff/rio-tiler/blob/master/rio_tiler/io/base.py#L365).
+        a requirement arguments (https://github.com/cogeotiff/rio-tiler/blob/main/rio_tiler/io/base.py#L365).
         This means we have to update the /info and /metadata endpoints in order to add the `assets` dependency.
 
     """
@@ -977,49 +1089,6 @@ class MultiBaseTilerFactory(TilerFactory):
 
     # Assets dependency
     assets_dependency: Type[DefaultDependency] = AssetsParams
-
-    ############################################################################
-    # /point
-    ############################################################################
-    def point(self):
-        """Register /point endpoints."""
-
-        @self.router.get(
-            r"/point/{lon},{lat}",
-            response_model=MultiBasePoint,
-            response_class=JSONResponse,
-            responses={200: {"description": "Return a value for a point"}},
-        )
-        def point(
-            response: Response,
-            lon: float = Path(..., description="Longitude"),
-            lat: float = Path(..., description="Latitude"),
-            src_path=Depends(self.path_dependency),
-            layer_params=Depends(self.layer_dependency),
-            dataset_params=Depends(self.dataset_dependency),
-            reader_params=Depends(self.reader_dependency),
-            env=Depends(self.environment_dependency),
-        ):
-            """Get Point value for a dataset."""
-            timings = []
-
-            with Timer() as t:
-                with rasterio.Env(**env):
-                    with self.reader(src_path, **reader_params) as src_dst:
-                        values = src_dst.point(
-                            lon,
-                            lat,
-                            **layer_params,
-                            **dataset_params,
-                        )
-            timings.append(("dataread", round(t.elapsed * 1000, 2)))
-
-            if OptionalHeader.server_timing in self.optional_headers:
-                response.headers["Server-Timing"] = ", ".join(
-                    [f"{name};dur={time}" for (name, time) in timings]
-                )
-
-            return {"coordinates": [lon, lat], "values": values}
 
     # Overwrite the `/info` endpoint to return the list of assets when no assets is passed.
     def info(self):
@@ -1132,7 +1201,7 @@ class MultiBaseTilerFactory(TilerFactory):
                     )
 
         # MultiBaseReader merged statistics
-        # https://github.com/cogeotiff/rio-tiler/blob/master/rio_tiler/io/base.py#L455-L468
+        # https://github.com/cogeotiff/rio-tiler/blob/main/rio_tiler/io/base.py#L455-L468
         # GET endpoint
         @self.router.get(
             "/statistics",
@@ -1197,70 +1266,43 @@ class MultiBaseTilerFactory(TilerFactory):
             env=Depends(self.environment_dependency),
         ):
             """Get Statistics from a geojson feature or featureCollection."""
+            fc = geojson
+            if isinstance(fc, Feature):
+                fc = FeatureCollection(features=[geojson])
+
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     # Default to all available assets
                     if not layer_params.assets and not layer_params.expression:
                         layer_params.assets = src_dst.assets
 
-                    # TODO: stream features for FeatureCollection
-                    if isinstance(geojson, FeatureCollection):
-                        for feature in geojson:
-                            data = src_dst.feature(
-                                feature.dict(exclude_none=True),
-                                **layer_params,
-                                **image_params,
-                                **dataset_params,
-                            )
-
-                            stats = get_array_statistics(
-                                data.as_masked(),
-                                **stats_params,
-                                **histogram_params,
-                            )
-
-                        feature.properties = feature.properties or {}
-                        feature.properties.update(
-                            {
-                                # NOTE: because we use `src_dst.feature` the statistics will be in form of
-                                # `Dict[str, BandStatistics]` and not `Dict[str, Dict[str, BandStatistics]]`
-                                "statistics": {
-                                    f"{data.band_names[ix]}": BandStatistics(
-                                        **stats[ix]
-                                    )
-                                    for ix in range(len(stats))
-                                }
-                            }
-                        )
-
-                    else:  # simple feature
+                    for feature in fc:
                         data = src_dst.feature(
-                            geojson.dict(exclude_none=True),
+                            feature.dict(exclude_none=True),
                             **layer_params,
                             **image_params,
                             **dataset_params,
                         )
+
                         stats = get_array_statistics(
                             data.as_masked(),
                             **stats_params,
                             **histogram_params,
                         )
 
-                        geojson.properties = geojson.properties or {}
-                        geojson.properties.update(
-                            {
-                                # NOTE: because we use `src_dst.feature` the statistics will be in form of
-                                # `Dict[str, BandStatistics]` and not `Dict[str, Dict[str, BandStatistics]]`
-                                "statistics": {
-                                    f"{data.band_names[ix]}": BandStatistics(
-                                        **stats[ix]
-                                    )
-                                    for ix in range(len(stats))
-                                }
+                    feature.properties = feature.properties or {}
+                    feature.properties.update(
+                        {
+                            # NOTE: because we use `src_dst.feature` the statistics will be in form of
+                            # `Dict[str, BandStatistics]` and not `Dict[str, Dict[str, BandStatistics]]`
+                            "statistics": {
+                                f"{data.band_names[ix]}": BandStatistics(**stats[ix])
+                                for ix in range(len(stats))
                             }
-                        )
+                        }
+                    )
 
-            return geojson
+            return fc.features[0] if isinstance(geojson, Feature) else fc
 
 
 @dataclass
@@ -1273,7 +1315,7 @@ class MultiBandTilerFactory(TilerFactory):
         .tile(), .point(), .preview() and the .part() methods will receive bands or expression arguments.
 
         The rio_tiler.io.MultiBandReader  `.info()` and `.metadata()` have `bands` as
-        a requirement arguments (https://github.com/cogeotiff/rio-tiler/blob/master/rio_tiler/io/base.py#L775).
+        a requirement arguments (https://github.com/cogeotiff/rio-tiler/blob/main/rio_tiler/io/base.py#L775).
         This means we have to update the /info and /metadata endpoints in order to add the `bands` dependency.
 
         For implementation example see https://github.com/developmentseed/titiler-pds
@@ -1376,7 +1418,7 @@ class MultiBandTilerFactory(TilerFactory):
             reader_params=Depends(self.reader_dependency),
             env=Depends(self.environment_dependency),
         ):
-            """Create image from a geojson feature."""
+            """Get Dataset statistics."""
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     return src_dst.statistics(
@@ -1414,42 +1456,19 @@ class MultiBandTilerFactory(TilerFactory):
             env=Depends(self.environment_dependency),
         ):
             """Get Statistics from a geojson feature or featureCollection."""
+            fc = geojson
+            if isinstance(fc, Feature):
+                fc = FeatureCollection(features=[geojson])
+
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     # Default to all available bands
                     if not bands_params.bands and not bands_params.expression:
                         bands_params.bands = src_dst.bands
 
-                    # TODO: stream features for FeatureCollection
-                    if isinstance(geojson, FeatureCollection):
-                        for feature in geojson:
-                            data = src_dst.feature(
-                                feature.dict(exclude_none=True),
-                                **bands_params,
-                                **image_params,
-                                **dataset_params,
-                            )
-                            stats = get_array_statistics(
-                                data.as_masked(),
-                                **stats_params,
-                                **histogram_params,
-                            )
-
-                            feature.properties = feature.properties or {}
-                            feature.properties.update(
-                                {
-                                    "statistics": {
-                                        f"{data.band_names[ix]}": BandStatistics(
-                                            **stats[ix]
-                                        )
-                                        for ix in range(len(stats))
-                                    }
-                                }
-                            )
-
-                    else:  # simple feature
+                    for feature in fc:
                         data = src_dst.feature(
-                            geojson.dict(exclude_none=True),
+                            feature.dict(exclude_none=True),
                             **bands_params,
                             **image_params,
                             **dataset_params,
@@ -1460,8 +1479,8 @@ class MultiBandTilerFactory(TilerFactory):
                             **histogram_params,
                         )
 
-                        geojson.properties = geojson.properties or {}
-                        geojson.properties.update(
+                        feature.properties = feature.properties or {}
+                        feature.properties.update(
                             {
                                 "statistics": {
                                     f"{data.band_names[ix]}": BandStatistics(
@@ -1472,18 +1491,14 @@ class MultiBandTilerFactory(TilerFactory):
                             }
                         )
 
-                    return geojson
+            return fc.features[0] if isinstance(geojson, Feature) else fc
 
 
 @dataclass
 class TMSFactory:
     """TileMatrixSet endpoints Factory."""
 
-    # Enum of supported TMS
-    supported_tms: Type[TileMatrixSetName] = TileMatrixSetName
-
-    # TileMatrixSet dependency
-    tms_dependency: Callable[..., TileMatrixSet] = TMSParams
+    supported_tms: TileMatrixSets = morecantile_tms
 
     # FastAPI router
     router: APIRouter = field(default_factory=APIRouter)
@@ -1503,7 +1518,8 @@ class TMSFactory:
         base_url = str(request.base_url)
         if self.router_prefix:
             base_url += self.router_prefix.lstrip("/")
-        return url_path.make_absolute_url(base_url=base_url)
+
+        return str(url_path.make_absolute_url(base_url=base_url))
 
     def register_routes(self):
         """Register TMS endpoint routes."""
@@ -1512,31 +1528,31 @@ class TMSFactory:
             r"/tileMatrixSets",
             response_model=TileMatrixSetList,
             response_model_exclude_none=True,
+            summary="Retrieve the list of available tiling schemes (tile matrix sets).",
+            operation_id="getTileMatrixSetsList",
         )
         async def TileMatrixSet_list(request: Request):
             """
-            Return list of supported TileMatrixSets.
-
-            Specs: http://docs.opengeospatial.org/per/19-069.html#_tilematrixsets
+            OGC Specification: http://docs.opengeospatial.org/per/19-069.html#_tilematrixsets
             """
             return {
                 "tileMatrixSets": [
                     {
-                        "id": tms.name,
-                        "title": tms.name,
+                        "id": tms,
+                        "title": tms,
                         "links": [
                             {
                                 "href": self.url_for(
                                     request,
                                     "TileMatrixSet_info",
-                                    TileMatrixSetId=tms.name,
+                                    TileMatrixSetId=tms,
                                 ),
                                 "rel": "item",
                                 "type": "application/json",
                             }
                         ],
                     }
-                    for tms in self.supported_tms
+                    for tms in self.supported_tms.list()
                 ]
             }
 
@@ -1544,7 +1560,79 @@ class TMSFactory:
             r"/tileMatrixSets/{TileMatrixSetId}",
             response_model=TileMatrixSet,
             response_model_exclude_none=True,
+            summary="Retrieve the definition of the specified tiling scheme (tile matrix set).",
+            operation_id="getTileMatrixSet",
         )
-        async def TileMatrixSet_info(tms: TileMatrixSet = Depends(self.tms_dependency)):
-            """Return TileMatrixSet JSON document."""
-            return tms
+        async def TileMatrixSet_info(
+            TileMatrixSetId: Literal[tuple(self.supported_tms.list())] = Path(
+                ..., description="TileMatrixSet Name."
+            )
+        ):
+            """
+            OGC Specification: http://docs.opengeospatial.org/per/19-069.html#_tilematrixset
+            """
+            return self.supported_tms.get(TileMatrixSetId)
+
+
+@dataclass
+class AlgorithmFactory:
+    """Algorithm endpoints Factory."""
+
+    # Supported algorithm
+    supported_algorithm: Algorithms = available_algorithms
+
+    # FastAPI router
+    router: APIRouter = field(default_factory=APIRouter)
+
+    def __post_init__(self):
+        """Post Init: register routes"""
+
+        def metadata(algorithm: BaseAlgorithm) -> AlgorithmMetadata:
+            """Algorithm Metadata"""
+            props = algorithm.schema()["properties"]
+
+            # Inputs Metadata
+            ins = {
+                k.replace("input_", ""): v["default"]
+                for k, v in props.items()
+                if k.startswith("input_") and "default" in v
+            }
+
+            # Output Metadata
+            outs = {
+                k.replace("output_", ""): v["default"]
+                for k, v in props.items()
+                if k.startswith("output_") and "default" in v
+            }
+
+            # Algorithm Parameters
+            params = {
+                k: v
+                for k, v in props.items()
+                if not k.startswith("input_") and not k.startswith("output_")
+            }
+            return AlgorithmMetadata(inputs=ins, outputs=outs, parameters=params)
+
+        @self.router.get(
+            "/algorithms",
+            response_model=Dict[str, AlgorithmMetadata],
+            summary="Retrieve the list of available Algorithms.",
+            operation_id="getAlgorithms",
+        )
+        def available_algorithms(request: Request):
+            """Retrieve the list of available Algorithms."""
+            return {k: metadata(v) for k, v in self.supported_algorithm.data.items()}
+
+        @self.router.get(
+            "/algorithms/{algorithmId}",
+            response_model=AlgorithmMetadata,
+            summary="Retrieve the metadata of the specified algorithm.",
+            operation_id="getAlgorithm",
+        )
+        def algorithm_metadata(
+            algorithm: Literal[tuple(self.supported_algorithm.list())] = Path(
+                ..., description="Algorithm name", alias="algorithmId"
+            ),
+        ):
+            """Retrieve the metadata of the specified algorithm."""
+            return metadata(self.supported_algorithm.get(algorithm))

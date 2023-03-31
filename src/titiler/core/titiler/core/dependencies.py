@@ -3,17 +3,14 @@
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy
-from morecantile import tms
-from morecantile.models import TileMatrixSet
+from fastapi import HTTPException, Query
 from rasterio.enums import Resampling
 from rio_tiler.colormap import cmap, parse_color
 from rio_tiler.errors import MissingAssets, MissingBands
 from rio_tiler.types import ColorMapType
-
-from fastapi import HTTPException, Query
 
 ColorMapName = Enum(  # type: ignore
     "ColorMapName", [(a, a) for a in sorted(cmap.list())]
@@ -21,32 +18,6 @@ ColorMapName = Enum(  # type: ignore
 ResamplingName = Enum(  # type: ignore
     "ResamplingName", [(r.name, r.name) for r in Resampling]
 )
-WebMercatorTileMatrixSetName = Enum(  # type: ignore
-    "WebMercatorTileMatrixSetName", [("WebMercatorQuad", "WebMercatorQuad")]
-)
-TileMatrixSetName = Enum(  # type: ignore
-    "TileMatrixSetName", [(a, a) for a in sorted(tms.list())]
-)
-
-
-def WebMercatorTMSParams(
-    TileMatrixSetId: WebMercatorTileMatrixSetName = Query(
-        WebMercatorTileMatrixSetName.WebMercatorQuad,  # type: ignore
-        description="TileMatrixSet Name (default: 'WebMercatorQuad')",
-    )
-) -> TileMatrixSet:
-    """TileMatrixSet Dependency."""
-    return tms.get(TileMatrixSetId.name)
-
-
-def TMSParams(
-    TileMatrixSetId: TileMatrixSetName = Query(
-        TileMatrixSetName.WebMercatorQuad,  # type: ignore
-        description="TileMatrixSet Name (default: 'WebMercatorQuad')",
-    )
-) -> TileMatrixSet:
-    """TileMatrixSet Dependency."""
-    return tms.get(TileMatrixSetId.name)
 
 
 def ColorMapParams(
@@ -63,14 +34,16 @@ def ColorMapParams(
                 colormap,
                 object_hook=lambda x: {int(k): parse_color(v) for k, v in x.items()},
             )
+
             # Make sure to match colormap type
             if isinstance(c, Sequence):
                 c = [(tuple(inter), parse_color(v)) for (inter, v) in c]
+
             return c
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             raise HTTPException(
                 status_code=400, detail="Could not parse the colormap value."
-            )
+            ) from e
 
     return None
 
@@ -156,7 +129,7 @@ class AssetsParams(DefaultDependency):
 
 @dataclass
 class AssetsBidxExprParams(DefaultDependency):
-    """Assets, Band Indexes and Expression parameters."""
+    """Assets, Expression and Asset's band Indexes parameters."""
 
     assets: Optional[List[str]] = Query(
         None,
@@ -180,7 +153,7 @@ class AssetsBidxExprParams(DefaultDependency):
         examples={
             "simple": {
                 "description": "Return results of expression between assets.",
-                "value": "asset1 + asset2 / asset3",
+                "value": "asset1_b1 + asset2_b1 / asset3_b1",
             },
         },
     )
@@ -188,34 +161,24 @@ class AssetsBidxExprParams(DefaultDependency):
     asset_indexes: Optional[Sequence[str]] = Query(
         None,
         title="Per asset band indexes",
-        description="Per asset band indexes",
+        description="Per asset band indexes (coma separated indexes)",
         alias="asset_bidx",
         examples={
             "one-asset": {
                 "description": "Return indexes 1,2,3 of asset `data`.",
-                "value": ["data|1;2;3"],
+                "value": ["data|1,2,3"],
             },
             "multi-assets": {
                 "description": "Return indexes 1,2,3 of asset `data` and indexes 1 of asset `cog`",
-                "value": ["data|1;2;3", "cog|1"],
+                "value": ["data|1,2,3", "cog|1"],
             },
         },
     )
 
-    asset_expression: Optional[Sequence[str]] = Query(
+    asset_as_band: Optional[bool] = Query(
         None,
-        title="Per asset band expression",
-        description="Per asset band expression",
-        examples={
-            "one-asset": {
-                "description": "Return results for expression `b1*b2+b3` of asset `data`.",
-                "value": ["data|b1*b2+b3"],
-            },
-            "multi-assets": {
-                "description": "Return results for expressions `b1*b2+b3` for asset `data` and `b1+b3` for asset `cog`.",
-                "value": ["data|b1*b2+b3", "cog|b1+b3"],
-            },
-        },
+        title="Consider asset as a 1 band dataset",
+        description="Asset as Band",
     )
 
     def __post_init__(self):
@@ -231,15 +194,10 @@ class AssetsBidxExprParams(DefaultDependency):
                 for idx in self.asset_indexes
             }
 
-        if self.asset_expression:
-            self.asset_expression: Dict[str, str] = {  # type: ignore
-                idx.split("|")[0]: idx.split("|")[1] for idx in self.asset_expression
-            }
-
 
 @dataclass
 class AssetsBidxExprParamsOptional(AssetsBidxExprParams):
-    """Assets, Band Indexes and Expression parameters but with no requirement."""
+    """Assets, Expression and Asset's band Indexes parameters but with no requirement."""
 
     def __post_init__(self):
         """Post Init."""
@@ -249,15 +207,10 @@ class AssetsBidxExprParamsOptional(AssetsBidxExprParams):
                 for idx in self.asset_indexes
             }
 
-        if self.asset_expression:
-            self.asset_expression: Dict[str, str] = {  # type: ignore
-                idx.split("|")[0]: idx.split("|")[1] for idx in self.asset_expression
-            }
-
 
 @dataclass
 class AssetsBidxParams(AssetsParams):
-    """asset and extra."""
+    """Assets, Asset's band Indexes and Asset's band Expression parameters."""
 
     asset_indexes: Optional[Sequence[str]] = Query(
         None,
@@ -397,29 +350,19 @@ class ImageRenderingParams(DefaultDependency):
     )
 
 
-@dataclass
-class PostProcessParams(DefaultDependency):
-    """Data Post-Processing options."""
-
-    in_range: Optional[List[str]] = Query(
+def RescalingParams(
+    rescale: Optional[List[str]] = Query(
         None,
-        alias="rescale",
         title="Min/Max data Rescaling",
         description="comma (',') delimited Min,Max range. Can set multiple time for multiple bands.",
         example=["0,2000", "0,1000", "0,10000"],  # band 1  # band 2  # band 3
     )
-    color_formula: Optional[str] = Query(
-        None,
-        title="Color Formula",
-        description="rio-color formula (info: https://github.com/mapbox/rio-color)",
-    )
+) -> Optional[List[Tuple[float, ...]]]:
+    """Min/Max data Rescaling"""
+    if rescale:
+        return [tuple(map(float, r.replace(" ", "").split(","))) for r in rescale]
 
-    def __post_init__(self):
-        """Post Init."""
-        if self.in_range:
-            self.in_range = [  # type: ignore
-                tuple(map(float, r.replace(" ", "").split(","))) for r in self.in_range
-            ]
+    return None
 
 
 @dataclass

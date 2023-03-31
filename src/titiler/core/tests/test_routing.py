@@ -2,16 +2,14 @@
 
 from concurrent import futures
 
+import httpx
 import pytest
 import rasterio
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, security, status
 from rasterio._env import get_gdal_config
-from requests.auth import HTTPBasicAuth
+from starlette.testclient import TestClient
 
 from titiler.core.routing import add_route_dependencies, apiroute_factory
-
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, security, status
-
-from starlette.testclient import TestClient
 
 
 @pytest.mark.xfail
@@ -79,7 +77,7 @@ def test_withCustomRoute(monkeypatch):
 
     app = FastAPI()
 
-    env = dict(GDAL_DISABLE_READDIR_ON_OPEN="FALSE")
+    env = {"GDAL_DISABLE_READDIR_ON_OPEN": "FALSE"}
     with pytest.warns(DeprecationWarning):
         route_class = apiroute_factory(env)
     router = APIRouter(route_class=route_class)
@@ -156,8 +154,8 @@ def test_register_deps():
         """two."""
         return "two"
 
-    auth_bob = HTTPBasicAuth(username="bob", password="ILoveSponge")
-    auth_notbob = HTTPBasicAuth(username="notbob", password="IHateSponge")
+    auth_bob = httpx.BasicAuth(username="bob", password="ILoveSponge")
+    auth_notbob = httpx.BasicAuth(username="notbob", password="IHateSponge")
 
     add_route_dependencies(
         app.routes,

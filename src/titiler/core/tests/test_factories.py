@@ -11,37 +11,42 @@ from unittest.mock import patch
 from urllib.parse import urlencode
 
 import attr
+import httpx
 import morecantile
 import numpy
-from requests.auth import HTTPBasicAuth
-from rio_tiler.io import BaseReader, COGReader, MultiBandReader, STACReader
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, security, status
+from morecantile.defaults import TileMatrixSets
+from rasterio.io import MemoryFile
+from rio_tiler.io import BaseReader, MultiBandReader, Reader, STACReader
+from starlette.requests import Request
+from starlette.testclient import TestClient
 
-from titiler.core.dependencies import DefaultDependency, TMSParams, WebMercatorTMSParams
 from titiler.core.errors import DEFAULT_STATUS_CODES, add_exception_handlers
 from titiler.core.factory import (
+    AlgorithmFactory,
+    BaseTilerFactory,
     MultiBandTilerFactory,
     MultiBaseTilerFactory,
     TilerFactory,
     TMSFactory,
 )
-from titiler.core.resources.enums import OptionalHeader
 
 from .conftest import DATA_DIR, mock_rasterio_open, parse_img
 
-from fastapi import Depends, FastAPI, HTTPException, Query, security, status
-
-from starlette.testclient import TestClient
-
-NB_DEFAULT_TMS = len(morecantile.tms.list())
+DEFAULT_TMS = morecantile.tms
+NB_DEFAULT_TMS = len(DEFAULT_TMS.list())
+WEB_TMS = TileMatrixSets({"WebMercatorQuad": morecantile.tms.get("WebMercatorQuad")})
 
 
 def test_TilerFactory():
     """Test TilerFactory class."""
     cog = TilerFactory()
-    assert len(cog.router.routes) == 25
-    assert cog.tms_dependency == TMSParams
+    assert len(cog.router.routes) == 27
+    assert len(cog.supported_tms.list()) == NB_DEFAULT_TMS
 
-    cog = TilerFactory(router_prefix="something", tms_dependency=WebMercatorTMSParams)
+    cog = TilerFactory(router_prefix="something", supported_tms=WEB_TMS)
+    assert len(cog.supported_tms.list()) == 1
+
     app = FastAPI()
     app.include_router(cog.router, prefix="/something")
     client = TestClient(app)
@@ -54,11 +59,11 @@ def test_TilerFactory():
     response = client.get(f"/something/NZTM2000/tilejson.json?url={DATA_DIR}/cog.tif")
     assert response.status_code == 422
 
-    cog = TilerFactory(add_preview=False, add_part=False)
+    cog = TilerFactory(add_preview=False, add_part=False, add_viewer=False)
     assert len(cog.router.routes) == 18
 
     app = FastAPI()
-    cog = TilerFactory(optional_headers=[OptionalHeader.server_timing])
+    cog = TilerFactory()
     app.include_router(cog.router)
 
     add_exception_handlers(app, DEFAULT_STATUS_CODES)
@@ -68,20 +73,11 @@ def test_TilerFactory():
     response = client.get(f"/tiles/8/87/48?url={DATA_DIR}/cog.tif&rescale=0,1000")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
-    timing = response.headers["server-timing"]
-    assert "dataread;dur" in timing
-    assert "postprocess;dur" in timing
-    assert "format;dur" in timing
-
     response = client.get(
         f"/tiles/8/87/48?url={DATA_DIR}/cog.tif&rescale=-3.4028235e+38,3.4028235e+38"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
-    timing = response.headers["server-timing"]
-    assert "dataread;dur" in timing
-    assert "postprocess;dur" in timing
-    assert "format;dur" in timing
 
     response = client.get(
         f"/tiles/8/87/48.tif?url={DATA_DIR}/cog.tif&bidx=1&bidx=1&bidx=1&return_mask=false"
@@ -179,26 +175,28 @@ def test_TilerFactory():
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
-    timing = response.headers["server-timing"]
-    assert "dataread;dur" in timing
-    assert "postprocess;dur" in timing
-    assert "format;dur" in timing
 
     response = client.get(
         f"/crop/-56.228,72.715,-54.547,73.188.png?url={DATA_DIR}/cog.tif&rescale=0,1000&max_size=256"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
-    timing = response.headers["server-timing"]
-    assert "dataread;dur" in timing
-    assert "postprocess;dur" in timing
-    assert "format;dur" in timing
 
     response = client.get(f"/point/-56.228,72.715?url={DATA_DIR}/cog.tif")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
-    timing = response.headers["server-timing"]
-    assert "dataread;dur" in timing
+    assert len(response.json()["values"]) == 1
+    assert response.json()["band_names"] == ["b1"]
+
+    response = client.get(f"/point/-56.228,72.715?url={DATA_DIR}/cog.tif&bidx=1&bidx=1")
+    assert len(response.json()["values"]) == 2
+    assert response.json()["band_names"] == ["b1", "b1"]
+
+    response = client.get(
+        f"/point/-56.228,72.715?url={DATA_DIR}/cog.tif&expression=b1*2"
+    )
+    assert len(response.json()["values"]) == 1
+    assert response.json()["band_names"] == ["b1*2"]
 
     response = client.get(f"/tilejson.json?url={DATA_DIR}/cog.tif")
     assert response.status_code == 200
@@ -233,6 +231,18 @@ def test_TilerFactory():
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/xml"
+    meta = parse_img(response.content)
+    assert meta["driver"] == "WMTS"
+    assert meta["crs"] == "EPSG:3857"
+
+    response = client.get(
+        f"/WorldCRS84Quad/WMTSCapabilities.xml?url={DATA_DIR}/cog.tif&minzoom=5&maxzoom=12"
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/xml"
+    meta = parse_img(response.content)
+    assert meta["driver"] == "WMTS"
+    assert str(meta["crs"]) == "OGC:CRS84"
 
     response = client.get(f"/bounds?url={DATA_DIR}/cog.tif")
     assert response.status_code == 200
@@ -349,7 +359,7 @@ def test_TilerFactory():
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 1
-    assert set(resp["1"].keys()) == {
+    assert set(resp["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -367,7 +377,7 @@ def test_TilerFactory():
         "percentile_2",
         "percentile_98",
     }
-    assert len(resp["1"]["histogram"][0]) == 10
+    assert len(resp["b1"]["histogram"][0]) == 10
 
     response = client.get(f"/statistics?url={DATA_DIR}/cog.tif&expression=b1*2")
     assert response.status_code == 200
@@ -400,7 +410,7 @@ def test_TilerFactory():
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 1
-    assert set(resp["1"].keys()) == {
+    assert set(resp["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -424,7 +434,7 @@ def test_TilerFactory():
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 1
-    assert set(resp["1"].keys()) == {
+    assert set(resp["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -443,7 +453,7 @@ def test_TilerFactory():
         "percentile_98",
     }
     # categories are stored in the histogram
-    assert len(resp["1"]["histogram"][1]) == 15
+    assert len(resp["b1"]["histogram"][1]) == 15
 
     response = client.get(
         f"/statistics?url={DATA_DIR}/cog.tif&categorical=true&c=1&c=2&c=3&c=4"
@@ -452,7 +462,7 @@ def test_TilerFactory():
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 1
-    assert set(resp["1"].keys()) == {
+    assert set(resp["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -470,15 +480,15 @@ def test_TilerFactory():
         "percentile_2",
         "percentile_98",
     }
-    assert resp["1"]["histogram"][1] == [1.0, 2.0, 3.0, 4.0]  # categories
-    assert resp["1"]["histogram"][0][3] == 0  # 4.0 is not present in the array
+    assert resp["b1"]["histogram"][1] == [1.0, 2.0, 3.0, 4.0]  # categories
+    assert resp["b1"]["histogram"][0][3] == 0  # 4.0 is not present in the array
 
     response = client.get(f"/statistics?url={DATA_DIR}/cog.tif&bidx=1&histogram_bins=3")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 1
-    assert len(resp["1"]["histogram"][0]) == 3
+    assert len(resp["b1"]["histogram"][0]) == 3
 
     response = client.get(
         f"/statistics?url={DATA_DIR}/cog.tif&bidx=1&histogram_range=5,10"
@@ -487,8 +497,8 @@ def test_TilerFactory():
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 1
-    assert min(resp["1"]["histogram"][1]) == 5.0
-    assert max(resp["1"]["histogram"][1]) == 10.0
+    assert min(resp["b1"]["histogram"][1]) == 5.0
+    assert max(resp["b1"]["histogram"][1]) == 10.0
 
     # POST - statistics
     response = client.post(
@@ -499,7 +509,7 @@ def test_TilerFactory():
     resp = response.json()
     assert resp["type"] == "Feature"
     assert len(resp["properties"]["statistics"]) == 1
-    assert set(resp["properties"]["statistics"]["1"].keys()) == {
+    assert set(resp["properties"]["statistics"]["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -527,7 +537,7 @@ def test_TilerFactory():
     resp = response.json()
     assert resp["type"] == "FeatureCollection"
     assert len(resp["features"][0]["properties"]["statistics"]) == 1
-    assert set(resp["features"][0]["properties"]["statistics"]["1"].keys()) == {
+    assert set(resp["features"][0]["properties"]["statistics"]["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -554,7 +564,7 @@ def test_TilerFactory():
     resp = response.json()
     assert resp["type"] == "Feature"
     assert len(resp["properties"]["statistics"]) == 1
-    assert set(resp["properties"]["statistics"]["1"].keys()) == {
+    assert set(resp["properties"]["statistics"]["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -572,7 +582,7 @@ def test_TilerFactory():
         "masked_pixels",
         "valid_percent",
     }
-    assert len(resp["properties"]["statistics"]["1"]["histogram"][1]) == 12
+    assert len(resp["properties"]["statistics"]["b1"]["histogram"][1]) == 12
 
     response = client.post(
         f"/statistics?url={DATA_DIR}/cog.tif&categorical=true&c=1&c=2&c=3&c=4",
@@ -583,7 +593,7 @@ def test_TilerFactory():
     resp = response.json()
     assert resp["type"] == "Feature"
     assert len(resp["properties"]["statistics"]) == 1
-    assert set(resp["properties"]["statistics"]["1"].keys()) == {
+    assert set(resp["properties"]["statistics"]["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -601,38 +611,34 @@ def test_TilerFactory():
         "masked_pixels",
         "valid_percent",
     }
-    assert len(resp["properties"]["statistics"]["1"]["histogram"][0]) == 4
-    assert resp["properties"]["statistics"]["1"]["histogram"][0][3] == 0
+    assert len(resp["properties"]["statistics"]["b1"]["histogram"][0]) == 4
+    assert resp["properties"]["statistics"]["b1"]["histogram"][0][3] == 0
+
+    # Test with Algorithm
+    response = client.get(f"/preview.tif?url={DATA_DIR}/dem.tif&return_mask=False")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/tiff; application=geotiff"
+    meta = parse_img(response.content)
+    assert meta["dtype"] == "float32"
+    assert meta["count"] == 1
+
+    response = client.get(
+        f"/preview.tif?url={DATA_DIR}/dem.tif&return_mask=False&algorithm=terrarium"
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/tiff; application=geotiff"
+    meta = parse_img(response.content)
+    assert meta["dtype"] == "uint8"
+    assert meta["count"] == 3
 
 
-@dataclass
-class ReaderParams(DefaultDependency):
-    """Reader options to overwrite min/max zoom."""
-
-    minzoom: int = 4
-    maxzoom: int = 8
-
-
-def test_TilerFactory_ReaderParams():
-    """Test TilerFactory factory with Reader dependency."""
-    cog = TilerFactory(reader_dependency=ReaderParams)
-    app = FastAPI()
-    app.include_router(cog.router)
-    client = TestClient(app)
-
-    response = client.get(f"/tilejson.json?url={DATA_DIR}/cog.tif")
-    tj = response.json()
-    assert tj["minzoom"] == 4
-    assert tj["maxzoom"] == 8
-
-
-@patch("rio_tiler.io.cogeo.rasterio")
+@patch("rio_tiler.io.rasterio.rasterio")
 def test_MultiBaseTilerFactory(rio):
     """test MultiBaseTilerFactory."""
     rio.open = mock_rasterio_open
 
     stac = MultiBaseTilerFactory(reader=STACReader)
-    assert len(stac.router.routes) == 27
+    assert len(stac.router.routes) == 29
 
     app = FastAPI()
     app.include_router(stac.router)
@@ -679,7 +685,7 @@ def test_MultiBaseTilerFactory(rio):
         "/preview.tif",
         params={
             "url": f"{DATA_DIR}/item.json",
-            "expression": "B01;B01;B01",
+            "expression": "B01_b1;B01_b1;B01_b1",
             "return_mask": False,
         },
     )
@@ -702,8 +708,23 @@ def test_MultiBaseTilerFactory(rio):
         "/preview.tif",
         params={
             "url": f"{DATA_DIR}/item.json",
-            "assets": "B01",
-            "asset_expression": "B01|b1;b1;b1",
+            "expression": "B01_b1;B01_b1;B01_b1",
+            "return_mask": False,
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/tiff; application=geotiff"
+    meta = parse_img(response.content)
+    assert meta["dtype"] == "int32"
+    assert meta["count"] == 3
+
+    # Use asset_as_band option
+    response = client.get(
+        "/preview.tif",
+        params={
+            "url": f"{DATA_DIR}/item.json",
+            "expression": "B01;B01;B01",
+            "asset_as_band": True,
             "return_mask": False,
         },
     )
@@ -721,7 +742,7 @@ def test_MultiBaseTilerFactory(rio):
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 2
-    assert set(resp["B01"]["1"].keys()) == {
+    assert set(resp["B01"]["b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -746,15 +767,15 @@ def test_MultiBaseTilerFactory(rio):
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 2
-    assert resp["B01"]["1"]
-    assert resp["B09"]["1"]
+    assert resp["B01"]["b1"]
+    assert resp["B09"]["b1"]
 
     response = client.get(f"/statistics?url={DATA_DIR}/item.json&assets=B01&assets=B09")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
-    assert list(resp) == ["B01_1", "B09_1"]
-    assert set(resp["B01_1"].keys()) == {
+    assert list(resp) == ["B01_b1", "B09_b1"]
+    assert set(resp["B01_b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -780,8 +801,8 @@ def test_MultiBaseTilerFactory(rio):
     assert response.headers["content-type"] == "application/json"
     resp = response.json()
     assert len(resp) == 2
-    assert resp["B01_1"]
-    assert resp["B09_1"]
+    assert resp["B01_b1"]
+    assert resp["B09_b1"]
 
     stac_feature = {
         "type": "FeatureCollection",
@@ -815,7 +836,7 @@ def test_MultiBaseTilerFactory(rio):
     resp = response.json()
     props = resp["properties"]["statistics"]
     assert len(props) == 2
-    assert set(props["B01_1"].keys()) == {
+    assert set(props["B01_b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -833,7 +854,7 @@ def test_MultiBaseTilerFactory(rio):
         "percentile_2",
         "percentile_98",
     }
-    assert props["B09_1"]
+    assert props["B09_b1"]
 
     response = client.post(
         f"/statistics?url={DATA_DIR}/item.json&assets=B01&assets=B09", json=stac_feature
@@ -843,7 +864,7 @@ def test_MultiBaseTilerFactory(rio):
     resp = response.json()
     props = resp["features"][0]["properties"]["statistics"]
     assert len(props) == 2
-    assert set(props["B01_1"].keys()) == {
+    assert set(props["B01_b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -861,7 +882,7 @@ def test_MultiBaseTilerFactory(rio):
         "percentile_2",
         "percentile_98",
     }
-    assert props["B09_1"]
+    assert props["B09_b1"]
 
     response = client.post(
         f"/statistics?url={DATA_DIR}/item.json&assets=B01&assets=B09&asset_bidx=B01|1&asset_bidx=B09|1",
@@ -872,7 +893,7 @@ def test_MultiBaseTilerFactory(rio):
     resp = response.json()
     props = resp["properties"]["statistics"]
     assert len(props) == 2
-    assert set(props["B01_1"].keys()) == {
+    assert set(props["B01_b1"].keys()) == {
         "min",
         "max",
         "mean",
@@ -890,7 +911,7 @@ def test_MultiBaseTilerFactory(rio):
         "percentile_2",
         "percentile_98",
     }
-    assert props["B09_1"]
+    assert props["B09_b1"]
 
 
 @attr.s
@@ -903,7 +924,18 @@ class BandFileReader(MultiBandReader):
     )
     reader_options: Dict = attr.ib(factory=dict)
 
-    reader: Type[BaseReader] = attr.ib(default=COGReader)
+    reader: Type[BaseReader] = attr.ib(default=Reader)
+
+    minzoom: int = attr.ib()
+    maxzoom: int = attr.ib()
+
+    @minzoom.default
+    def _minzoom(self):
+        return self.tms.minzoom
+
+    @maxzoom.default
+    def _maxzoom(self):
+        return self.tms.maxzoom
 
     def __attrs_post_init__(self):
         """Parse Sceneid and get grid bounds."""
@@ -930,7 +962,7 @@ def test_MultiBandTilerFactory():
     bands = MultiBandTilerFactory(
         reader=BandFileReader, path_dependency=CustomPathParams
     )
-    assert len(bands.router.routes) == 26
+    assert len(bands.router.routes) == 28
 
     app = FastAPI()
     app.include_router(bands.router)
@@ -1228,6 +1260,28 @@ def test_TMSFactory():
     assert body["type"] == "TileMatrixSetType"
     assert body["identifier"] == "WebMercatorQuad"
 
+    response = client.get("/tms/tileMatrixSets/WebMercatorQua")
+    assert response.status_code == 422
+
+    app = FastAPI()
+    tms_endpoints = TMSFactory(supported_tms=WEB_TMS)
+    app.include_router(
+        tms_endpoints.router,
+    )
+
+    client = TestClient(app)
+
+    response = client.get("/tileMatrixSets")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["tileMatrixSets"]) == 1
+
+    response = client.get("/tileMatrixSets/WebMercatorQuad")
+    assert response.status_code == 200
+
+    response = client.get("/tileMatrixSets/LINZAntarticaMapTilegrid")
+    assert response.status_code == 422
+
 
 def test_TilerFactory_WithDependencies():
     """Test TilerFactory class."""
@@ -1255,15 +1309,14 @@ def test_TilerFactory_WithDependencies():
         ],
         router_prefix="something",
     )
-    assert len(cog.router.routes) == 25
-    assert cog.tms_dependency == TMSParams
+    assert len(cog.router.routes) == 27
 
     app = FastAPI()
     app.include_router(cog.router, prefix="/something")
     client = TestClient(app)
 
-    auth_bob = HTTPBasicAuth(username="bob", password="ILoveSponge")
-    auth_notbob = HTTPBasicAuth(username="notbob", password="IHateSponge")
+    auth_bob = httpx.BasicAuth(username="bob", password="ILoveSponge")
+    auth_notbob = httpx.BasicAuth(username="notbob", password="IHateSponge")
 
     response = client.get(f"/something/tilejson.json?url={DATA_DIR}/cog.tif")
     assert response.status_code == 200
@@ -1372,3 +1425,91 @@ def test_TilerFactory_WithGdalEnv():
 
     response = client.get(f"/info?url={DATA_DIR}/non_cog.tif&disable_read=empty_dir")
     assert not response.json()["overviews"]
+
+
+def test_algorithm():
+    """Test Algorithms endpoint."""
+    algorithm = AlgorithmFactory()
+
+    app = FastAPI()
+    app.include_router(algorithm.router)
+    client = TestClient(app)
+
+    response = client.get("/algorithms")
+    assert response.status_code == 200
+    assert "hillshade" in response.json()
+
+    response = client.get("/algorithms/hillshade")
+    assert response.status_code == 200
+
+
+def test_path_param_in_prefix():
+    """Test path params in prefix."""
+
+    @dataclass
+    class EndpointFactory(BaseTilerFactory):
+        def register_routes(self):
+            """register endpoints."""
+
+            @self.router.get("/{param2}.json")
+            def route2(
+                request: Request, param1: int = Path(...), param2: str = Path(...)
+            ):
+                """return url."""
+                return {"url": self.url_for(request, "route1", param2=param2)}
+
+            @self.router.get("/{param2}")
+            def route1(param1: int = Path(...), param2: str = Path(...)):
+                """return param."""
+                return {"value": param2}
+
+    app = FastAPI()
+    endpoints = EndpointFactory(reader=Reader, router_prefix="/prefixed/{param1}")
+    app.include_router(endpoints.router, prefix="/prefixed/{param1}")
+    client = TestClient(app)
+
+    response = client.get("/p")
+    assert response.status_code == 404
+
+    response = client.get("/prefixed/100/value")
+    assert response.json()["value"] == "value"
+
+    response = client.get("/prefixed/100/value.json")
+    assert response.json()["url"] == "http://testserver/prefixed/100/value"
+
+
+def test_AutoFormat_Colormap():
+    """Make sure we take both alpha/mask into account."""
+    app = FastAPI()
+    cog = TilerFactory()
+    app.include_router(cog.router)
+
+    with TestClient(app) as client:
+
+        cmap = urlencode(
+            {
+                "colormap": json.dumps(
+                    [
+                        # ([min, max], [r, g, b, a])
+                        ([0, 1], [255, 255, 255, 0]),  # should be masked
+                        ([2, 6000], [255, 0, 0, 255]),
+                        ([6001, 300000], [0, 255, 0, 255]),
+                    ]
+                )
+            }
+        )
+
+        response = client.get(f"/preview?url={DATA_DIR}/cog.tif&bidx=1&{cmap}")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+
+        with MemoryFile(response.content) as mem:
+            with mem.open() as dst:
+                img = dst.read()
+                assert img[:, 0, 0].tolist() == [
+                    0,
+                    0,
+                    0,
+                    0,
+                ]  # when creating a PNG, GDAL will set masked value to 0
+                assert img[:, 500, 500].tolist() == [255, 0, 0, 255]
