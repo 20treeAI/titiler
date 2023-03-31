@@ -72,179 +72,179 @@ jobs:
           name: ${{ matrix.python-version }}
           fail_ci_if_error: false
 
-  publish:
-    needs: [tests]
-    runs-on: ubuntu-latest
-    if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
-    steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v1
-        with:
-          python-version: ${{ env.LATEST_PY_VERSION }}
+  # publish:
+  #   needs: [tests]
+  #   runs-on: ubuntu-latest
+  #   if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
+  #   steps:
+  #     - uses: actions/checkout@v2
+  #     - name: Set up Python
+  #       uses: actions/setup-python@v1
+  #       with:
+  #         python-version: ${{ env.LATEST_PY_VERSION }}
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install twine build hatch
+  #     - name: Install dependencies
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install twine build hatch
 
-      - name: Set tag version
-        id: tag
-        # https://stackoverflow.com/questions/58177786/get-the-current-pushed-tag-in-github-actions
-        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+  #     - name: Set tag version
+  #       id: tag
+  #       # https://stackoverflow.com/questions/58177786/get-the-current-pushed-tag-in-github-actions
+  #       run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
 
-      - name: Set module version
-        id: module
-        # https://stackoverflow.com/questions/58177786/get-the-current-pushed-tag-in-github-actions
-        run: echo ::set-output name=version::$(hatch --quiet version)
+  #     - name: Set module version
+  #       id: module
+  #       # https://stackoverflow.com/questions/58177786/get-the-current-pushed-tag-in-github-actions
+  #       run: echo ::set-output name=version::$(hatch --quiet version)
 
-      - name: Build and publish titiler packages
-        if: steps.tag.outputs.tag == steps.module.outputs.version
-        env:
-          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
-          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
-        run: |
-          scripts/publish
+  #     - name: Build and publish titiler packages
+  #       if: steps.tag.outputs.tag == steps.module.outputs.version
+  #       env:
+  #         TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+  #         TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+  #       run: |
+  #         scripts/publish
 
-  publish-docker:
-    needs: [tests]
-    if: github.ref == 'refs/heads/main' || startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v2
+  # publish-docker:
+  #   needs: [tests]
+  #   if: github.ref == 'refs/heads/main' || startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v2
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
+  #     - name: Set up QEMU
+  #       uses: docker/setup-qemu-action@v1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v1
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v1
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #     - name: Login to DockerHub
+  #       uses: docker/login-action@v1
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Login to Github
-        uses: docker/login-action@v1
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+  #     - name: Login to Github
+  #       uses: docker/login-action@v1
+  #       with:
+  #         registry: ghcr.io
+  #         username: ${{ github.actor }}
+  #         password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set tag version
-        id: tag
-        # https://stackoverflow.com/questions/58177786/get-the-current-pushed-tag-in-github-actions
-        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
-      # Uvicorn
-      # Push `latest` when commiting to main
-      - name: Build and push uvicorn
-        if: github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v2
-        with:
-          # See https://github.com/developmentseed/titiler/discussions/387
-          # platforms: linux/amd64
-          context: .
-          file: dockerfiles/Dockerfile.uvicorn
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}-uvicorn:latest
+  #     - name: Set tag version
+  #       id: tag
+  #       # https://stackoverflow.com/questions/58177786/get-the-current-pushed-tag-in-github-actions
+  #       run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+  #     # Uvicorn
+  #     # Push `latest` when commiting to main
+  #     - name: Build and push uvicorn
+  #       if: github.ref == 'refs/heads/main'
+  #       uses: docker/build-push-action@v2
+  #       with:
+  #         # See https://github.com/developmentseed/titiler/discussions/387
+  #         # platforms: linux/amd64
+  #         context: .
+  #         file: dockerfiles/Dockerfile.uvicorn
+  #         push: true
+  #         tags: |
+  #           ghcr.io/${{ github.repository }}-uvicorn:latest
 
-      # Push `{VERSION}` when pushing a new tag
-      - name: Build and push uvicorn
-        if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
-        uses: docker/build-push-action@v2
-        with:
-          # See https://github.com/developmentseed/titiler/discussions/387
-          platforms: linux/amd64
-          context: .
-          file: dockerfiles/Dockerfile.uvicorn
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}-uvicorn:${{ steps.tag.outputs.tag }}
+  #     # Push `{VERSION}` when pushing a new tag
+  #     - name: Build and push uvicorn
+  #       if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
+  #       uses: docker/build-push-action@v2
+  #       with:
+  #         # See https://github.com/developmentseed/titiler/discussions/387
+  #         platforms: linux/amd64
+  #         context: .
+  #         file: dockerfiles/Dockerfile.uvicorn
+  #         push: true
+  #         tags: |
+  #           ghcr.io/${{ github.repository }}-uvicorn:${{ steps.tag.outputs.tag }}
 
-      # Gunicorn
-      # Push `latest` when commiting to main
-      - name: Build and push
-        if: github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v2
-        with:
-          # See https://github.com/developmentseed/titiler/discussions/387
-          # platforms: linux/amd64
-          context: .
-          file: dockerfiles/Dockerfile.gunicorn
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
+  #     # Gunicorn
+  #     # Push `latest` when commiting to main
+  #     - name: Build and push
+  #       if: github.ref == 'refs/heads/main'
+  #       uses: docker/build-push-action@v2
+  #       with:
+  #         # See https://github.com/developmentseed/titiler/discussions/387
+  #         # platforms: linux/amd64
+  #         context: .
+  #         file: dockerfiles/Dockerfile.gunicorn
+  #         push: true
+  #         tags: |
+  #           ghcr.io/${{ github.repository }}:latest
 
-      # Push `{VERSION}` when pushing a new tag
-      - name: Build and push
-        if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
-        uses: docker/build-push-action@v2
-        with:
-          # See https://github.com/developmentseed/titiler/discussions/387
-          # platforms: linux/amd64
-          context: .
-          file: dockerfiles/Dockerfile.gunicorn
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }}
+  #     # Push `{VERSION}` when pushing a new tag
+  #     - name: Build and push
+  #       if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
+  #       uses: docker/build-push-action@v2
+  #       with:
+  #         # See https://github.com/developmentseed/titiler/discussions/387
+  #         # platforms: linux/amd64
+  #         context: .
+  #         file: dockerfiles/Dockerfile.gunicorn
+  #         push: true
+  #         tags: |
+  #           ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }}
 
-  deploy:
-    needs: [tests, publish]
-    runs-on: ubuntu-latest
-    if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
+  # deploy:
+  #   needs: [tests, publish]
+  #   runs-on: ubuntu-latest
+  #   if: startsWith(github.event.ref, 'refs/tags') || github.event_name == 'release'
 
-    defaults:
-      run:
-        working-directory: deployment/aws
+  #   defaults:
+  #     run:
+  #       working-directory: deployment/aws
 
-    steps:
-      - uses: actions/checkout@v3
+  #   steps:
+  #     - uses: actions/checkout@v3
 
-      # Let's wait a bit to make sure Pypi is up to date
-      - name: Sleep for 120 seconds
-        run: sleep 120s
-        shell: bash
+  #     # Let's wait a bit to make sure Pypi is up to date
+  #     - name: Sleep for 120 seconds
+  #       run: sleep 120s
+  #       shell: bash
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+  #     - name: Configure AWS credentials
+  #       uses: aws-actions/configure-aws-credentials@v1
+  #       with:
+  #         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws-region: us-east-1
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v1
-        with:
-          node-version: '14.x'
+  #     - name: Set up Node.js
+  #       uses: actions/setup-node@v1
+  #       with:
+  #         node-version: '14.x'
 
-      - name: Install cdk
-        run: npm install -g
+  #     - name: Install cdk
+  #       run: npm install -g
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
+  #     - name: Set up Python
+  #       uses: actions/setup-python@v4
+  #       with:
+  #         python-version: '3.x'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-cdk.txt
+  #     - name: Install dependencies
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         python -m pip install -r requirements-cdk.txt
 
-      # Let's wait a bit to make sure package is available on pypi
-      - name: Sleep for 120 seconds
-        run: sleep 120s
-        shell: bash
+  #     # Let's wait a bit to make sure package is available on pypi
+  #     - name: Sleep for 120 seconds
+  #       run: sleep 120s
+  #       shell: bash
 
-      # Build and Deploy CDK application
-      - name: Build & Deploy
-        run: npm run cdk -- deploy ${{ secrets.STACK_NAME }}-lambda-${{ secrets.STACK_STAGE }} --require-approval never
-        env:
-          TITILER_STACK_NAME: ${{ secrets.STACK_NAME }}
-          TITILER_STACK_STAGE: ${{ secrets.STACK_STAGE }}
-          TITILER_STACK_MEMORY: ${{ secrets.STACK_MEMORY }}
-          TITILER_STACK_OWNER: ${{ secrets.STACK_OWNER }}
-          TITILER_STACK_CLIENT: ${{ secrets.STACK_CLIENT }}
-          TITILER_STACK_BUCKETS: ${{ secrets.STACK_BUCKETS }}
+  #     # Build and Deploy CDK application
+  #     - name: Build & Deploy
+  #       run: npm run cdk -- deploy ${{ secrets.STACK_NAME }}-lambda-${{ secrets.STACK_STAGE }} --require-approval never
+  #       env:
+  #         TITILER_STACK_NAME: ${{ secrets.STACK_NAME }}
+  #         TITILER_STACK_STAGE: ${{ secrets.STACK_STAGE }}
+  #         TITILER_STACK_MEMORY: ${{ secrets.STACK_MEMORY }}
+  #         TITILER_STACK_OWNER: ${{ secrets.STACK_OWNER }}
+  #         TITILER_STACK_CLIENT: ${{ secrets.STACK_CLIENT }}
+  #         TITILER_STACK_BUCKETS: ${{ secrets.STACK_BUCKETS }}
