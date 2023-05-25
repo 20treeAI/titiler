@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Type, Union
 from urllib.parse import urlencode
 
+import jinja2
 import rasterio
 from fastapi import APIRouter, Body, Depends, Path, Query
 from fastapi.dependencies.utils import get_parameterless_sub_dependant
@@ -14,6 +15,8 @@ from geojson_pydantic.geometries import Polygon
 from morecantile import TileMatrixSet
 from morecantile import tms as morecantile_tms
 from morecantile.defaults import TileMatrixSets
+from rasterio.crs import CRS
+from rio_tiler.constants import WGS84_CRS
 from rio_tiler.io import BaseReader, MultiBandReader, MultiBaseReader, Reader
 from rio_tiler.models import BandStatistics, Bounds, Info
 from rio_tiler.types import ColorMapType
@@ -35,12 +38,15 @@ from titiler.core.dependencies import (
     BandsParams,
     BidxExprParams,
     ColorMapParams,
+    CoordCRSParams,
     DatasetParams,
     DatasetPathParams,
     DefaultDependency,
+    DstCRSParams,
     HistogramParams,
     ImageParams,
     ImageRenderingParams,
+    RescaleType,
     RescalingParams,
     StatisticsParams,
 )
@@ -60,14 +66,10 @@ from titiler.core.resources.enums import ImageType, MediaType, OptionalHeader
 from titiler.core.resources.responses import GeoJSONResponse, JSONResponse, XMLResponse
 from titiler.core.routing import EndpointScope
 
-try:
-    from importlib.resources import files as resources_files  # type: ignore
-except ImportError:
-    # Try backported to PY<39 `importlib_resources`.
-    from importlib_resources import files as resources_files  # type: ignore
-
-# TODO: mypy fails in python 3.9, we need to find a proper way to do this
-templates = Jinja2Templates(directory=str(resources_files(__package__) / "templates"))  # type: ignore
+DEFAULT_TEMPLATES = Jinja2Templates(
+    directory="",
+    loader=jinja2.ChoiceLoader([jinja2.PackageLoader(__package__, "templates")]),
+)  # type:ignore
 
 
 img_endpoint_params: Dict[str, Any] = {
@@ -141,6 +143,8 @@ class BaseTilerFactory(metaclass=abc.ABCMeta):
     render_dependency: Type[DefaultDependency] = ImageRenderingParams
     colormap_dependency: Callable[..., Optional[ColorMapType]] = ColorMapParams
 
+    rescale_dependency: Callable[..., Optional[RescaleType]] = RescalingParams
+
     # Post Processing Dependencies (algorithm)
     process_dependency: Callable[
         ..., Optional[BaseAlgorithm]
@@ -170,6 +174,8 @@ class BaseTilerFactory(metaclass=abc.ABCMeta):
     )
 
     extensions: List[FactoryExtension] = field(default_factory=list)
+
+    templates: Jinja2Templates = DEFAULT_TEMPLATES
 
     def __post_init__(self):
         """Post Init: register route and configure specific options."""
@@ -364,6 +370,7 @@ class TilerFactory(BaseTilerFactory):
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     return Feature(
+                        type="Feature",
                         geometry=Polygon.from_bounds(*src_dst.geographic_bounds),
                         properties=src_dst.info(),
                     )
@@ -425,6 +432,7 @@ class TilerFactory(BaseTilerFactory):
                 ..., description="GeoJSON Feature or FeatureCollection."
             ),
             src_path=Depends(self.path_dependency),
+            coord_crs: Optional[CRS] = Depends(CoordCRSParams),
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
             image_params=Depends(self.img_dependency),
@@ -436,13 +444,14 @@ class TilerFactory(BaseTilerFactory):
             """Get Statistics from a geojson feature or featureCollection."""
             fc = geojson
             if isinstance(fc, Feature):
-                fc = FeatureCollection(features=[geojson])
+                fc = FeatureCollection(type="FeatureCollection", features=[geojson])
 
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     for feature in fc:
                         data = src_dst.feature(
                             feature.dict(exclude_none=True),
+                            shape_crs=coord_crs or WGS84_CRS,
                             **layer_params,
                             **image_params,
                             **dataset_params,
@@ -512,7 +521,7 @@ class TilerFactory(BaseTilerFactory):
                 description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
             ),
             post_process=Depends(self.process_dependency),
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            rescale=Depends(self.rescale_dependency),
             color_formula: Optional[str] = Query(
                 None,
                 title="Color Formula",
@@ -604,9 +613,7 @@ class TilerFactory(BaseTilerFactory):
                 description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
             ),
             post_process=Depends(self.process_dependency),  # noqa
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(
-                RescalingParams
-            ),  # noqa
+            rescale=Depends(self.rescale_dependency),  # noqa
             color_formula: Optional[str] = Query(  # noqa
                 None,
                 title="Color Formula",
@@ -687,9 +694,7 @@ class TilerFactory(BaseTilerFactory):
                 description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
             ),
             post_process=Depends(self.process_dependency),  # noqa
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(
-                RescalingParams
-            ),  # noqa
+            rescale=Depends(self.rescale_dependency),  # noqa
             color_formula: Optional[str] = Query(  # noqa
                 None,
                 title="Color Formula",
@@ -708,8 +713,8 @@ class TilerFactory(BaseTilerFactory):
                 tilejson_url += f"?{urlencode(request.query_params._list)}"
 
             tms = self.supported_tms.get(TileMatrixSetId)
-            return templates.TemplateResponse(
-                name="index.html",
+            return self.templates.TemplateResponse(
+                name="map.html",
                 context={
                     "request": request,
                     "tilejson_endpoint": tilejson_url,
@@ -754,9 +759,7 @@ class TilerFactory(BaseTilerFactory):
                 description="Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).",
             ),
             post_process=Depends(self.process_dependency),  # noqa
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(
-                RescalingParams
-            ),  # noqa
+            rescale=Depends(self.rescale_dependency),  # noqa
             color_formula: Optional[str] = Query(  # noqa
                 None,
                 title="Color Formula",
@@ -817,7 +820,7 @@ class TilerFactory(BaseTilerFactory):
                         </TileMatrix>"""
                 tileMatrix.append(tm)
 
-            return templates.TemplateResponse(
+            return self.templates.TemplateResponse(
                 "wmts.xml",
                 {
                     "request": request,
@@ -848,17 +851,20 @@ class TilerFactory(BaseTilerFactory):
             lon: float = Path(..., description="Longitude"),
             lat: float = Path(..., description="Latitude"),
             src_path=Depends(self.path_dependency),
+            coord_crs: Optional[CRS] = Depends(CoordCRSParams),
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
             reader_params=Depends(self.reader_dependency),
             env=Depends(self.environment_dependency),
         ):
             """Get Point value for a dataset."""
+
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     pts = src_dst.point(
                         lon,
                         lat,
+                        coord_crs=coord_crs or WGS84_CRS,
                         **layer_params,
                         **dataset_params,
                     )
@@ -883,10 +889,11 @@ class TilerFactory(BaseTilerFactory):
             ),
             src_path=Depends(self.path_dependency),
             layer_params=Depends(self.layer_dependency),
+            dst_crs: Optional[CRS] = Depends(DstCRSParams),
             dataset_params=Depends(self.dataset_dependency),
-            img_params=Depends(self.img_dependency),
+            image_params=Depends(self.img_dependency),
             post_process=Depends(self.process_dependency),
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            rescale=Depends(self.rescale_dependency),  # noqa
             color_formula: Optional[str] = Query(
                 None,
                 title="Color Formula",
@@ -902,8 +909,9 @@ class TilerFactory(BaseTilerFactory):
                 with self.reader(src_path, **reader_params) as src_dst:
                     image = src_dst.preview(
                         **layer_params,
-                        **img_params,
+                        **image_params,
                         **dataset_params,
+                        dst_crs=dst_crs,
                     )
                     dst_colormap = getattr(src_dst, "colormap", None)
 
@@ -952,11 +960,13 @@ class TilerFactory(BaseTilerFactory):
             maxy: float = Path(..., description="Bounding box max Y"),
             format: ImageType = Query(..., description="Output image type."),
             src_path=Depends(self.path_dependency),
+            dst_crs: Optional[CRS] = Depends(DstCRSParams),
+            coord_crs: Optional[CRS] = Depends(CoordCRSParams),
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
             image_params=Depends(self.img_dependency),
             post_process=Depends(self.process_dependency),
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            rescale=Depends(self.rescale_dependency),
             color_formula: Optional[str] = Query(
                 None,
                 title="Color Formula",
@@ -972,6 +982,8 @@ class TilerFactory(BaseTilerFactory):
                 with self.reader(src_path, **reader_params) as src_dst:
                     image = src_dst.part(
                         [minx, miny, maxx, maxy],
+                        dst_crs=dst_crs,
+                        bounds_crs=coord_crs or WGS84_CRS,
                         **layer_params,
                         **image_params,
                         **dataset_params,
@@ -1017,11 +1029,12 @@ class TilerFactory(BaseTilerFactory):
                 None, description="Output image type. Default is auto."
             ),
             src_path=Depends(self.path_dependency),
+            coord_crs: Optional[CRS] = Depends(CoordCRSParams),
             layer_params=Depends(self.layer_dependency),
             dataset_params=Depends(self.dataset_dependency),
             image_params=Depends(self.img_dependency),
             post_process=Depends(self.process_dependency),
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
+            rescale=Depends(self.rescale_dependency),
             color_formula: Optional[str] = Query(
                 None,
                 title="Color Formula",
@@ -1037,6 +1050,7 @@ class TilerFactory(BaseTilerFactory):
                 with self.reader(src_path, **reader_params) as src_dst:
                     image = src_dst.feature(
                         geojson.dict(exclude_none=True),
+                        shape_crs=coord_crs or WGS84_CRS,
                         **layer_params,
                         **image_params,
                         **dataset_params,
@@ -1138,6 +1152,7 @@ class MultiBaseTilerFactory(TilerFactory):
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     return Feature(
+                        type="Feature",
                         geometry=Polygon.from_bounds(*src_dst.geographic_bounds),
                         properties={
                             asset: asset_info
@@ -1257,6 +1272,7 @@ class MultiBaseTilerFactory(TilerFactory):
                 ..., description="GeoJSON Feature or FeatureCollection."
             ),
             src_path=Depends(self.path_dependency),
+            coord_crs: Optional[CRS] = Depends(CoordCRSParams),
             layer_params=Depends(AssetsBidxExprParamsOptional),
             dataset_params=Depends(self.dataset_dependency),
             image_params=Depends(self.img_dependency),
@@ -1268,7 +1284,7 @@ class MultiBaseTilerFactory(TilerFactory):
             """Get Statistics from a geojson feature or featureCollection."""
             fc = geojson
             if isinstance(fc, Feature):
-                fc = FeatureCollection(features=[geojson])
+                fc = FeatureCollection(type="FeatureCollection", features=[geojson])
 
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
@@ -1279,6 +1295,7 @@ class MultiBaseTilerFactory(TilerFactory):
                     for feature in fc:
                         data = src_dst.feature(
                             feature.dict(exclude_none=True),
+                            shape_crs=coord_crs or WGS84_CRS,
                             **layer_params,
                             **image_params,
                             **dataset_params,
@@ -1373,6 +1390,7 @@ class MultiBandTilerFactory(TilerFactory):
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
                     return Feature(
+                        type="Feature",
                         geometry=Polygon.from_bounds(*src_dst.geographic_bounds),
                         properties=src_dst.info(**bands_params),
                     )
@@ -1447,6 +1465,7 @@ class MultiBandTilerFactory(TilerFactory):
                 ..., description="GeoJSON Feature or FeatureCollection."
             ),
             src_path=Depends(self.path_dependency),
+            coord_crs: Optional[CRS] = Depends(CoordCRSParams),
             bands_params=Depends(BandsExprParamsOptional),
             dataset_params=Depends(self.dataset_dependency),
             image_params=Depends(self.img_dependency),
@@ -1458,7 +1477,7 @@ class MultiBandTilerFactory(TilerFactory):
             """Get Statistics from a geojson feature or featureCollection."""
             fc = geojson
             if isinstance(fc, Feature):
-                fc = FeatureCollection(features=[geojson])
+                fc = FeatureCollection(type="FeatureCollection", features=[geojson])
 
             with rasterio.Env(**env):
                 with self.reader(src_path, **reader_params) as src_dst:
@@ -1469,6 +1488,7 @@ class MultiBandTilerFactory(TilerFactory):
                     for feature in fc:
                         data = src_dst.feature(
                             feature.dict(exclude_none=True),
+                            shape_crs=coord_crs or WGS84_CRS,
                             **bands_params,
                             **image_params,
                             **dataset_params,
