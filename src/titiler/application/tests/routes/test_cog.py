@@ -4,7 +4,7 @@ import json
 import os
 from io import BytesIO
 from unittest.mock import patch
-from urllib.parse import parse_qsl, urlencode, urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import numpy
 import pytest
@@ -187,8 +187,12 @@ def test_tile(rio, app):
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
 
-    cmap = urlencode(
-        {
+    # valid colormap
+    response = app.get(
+        "/cog/tiles/8/53/50.png",
+        params={
+            "url": "https://myurl.com/above_cog.tif",
+            "bidx": 1,
             "colormap": json.dumps(
                 {
                     "1": [58, 102, 24, 255],
@@ -196,27 +200,24 @@ def test_tile(rio, app):
                     "3": "#b1b129",
                     "4": "#ddcb9aFF",
                 }
-            )
-        }
-    )
-    response = app.get(
-        f"/cog/tiles/8/53/50.png?url=https://myurl.com/above_cog.tif&bidx=1&{cmap}"
+            ),
+        },
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
 
-    cmap = urlencode({"colormap": json.dumps({"1": [58, 102]})})
+    # invalid colormap shape
     response = app.get(
-        f"/cog/tiles/8/53/50.png?url=https://myurl.com/above_cog.tif&bidx=1&{cmap}"
+        "/cog/tiles/8/53/50.png",
+        params={
+            "url": "https://myurl.com/above_cog.tif",
+            "bidx": 1,
+            "colormap": json.dumps({"1": [58, 102]}),
+        },
     )
     assert response.status_code == 400
 
-    cmap = urlencode({"colormap": {"1": "#ddcb9aFF"}})
-    response = app.get(
-        f"/cog/tiles/8/53/50.png?url=https://myurl.com/above_cog.tif&bidx=1&{cmap}"
-    )
-    assert response.status_code == 400
-
+    # bad resampling
     response = app.get(
         "/cog/tiles/8/53/50.png?url=https://myurl.com/above_cog.tif&bidx=1&resampling=somethingwrong"
     )
@@ -269,9 +270,13 @@ def test_tilejson(rio, app):
         "3": "#b1b129",
         "4": "#ddcb9aFF",
     }
-    cmap = urlencode({"colormap": json.dumps(cmap_dict)})
     response = app.get(
-        f"/cog/tilejson.json?url=https://myurl.com/above_cog.tif&bidx=1&{cmap}"
+        "/cog/tilejson.json",
+        params={
+            "url": "https://myurl.com/above_cog.tif",
+            "bidx": 1,
+            "colormap": json.dumps(cmap_dict),
+        },
     )
     assert response.status_code == 200
     body = response.json()
@@ -340,11 +345,11 @@ def test_preview(rio, app):
 
 @patch("rio_tiler.io.rasterio.rasterio")
 def test_part(rio, app):
-    """test /crop endpoint."""
+    """test /bbox endpoint."""
     rio.open = mock_rasterio_open
 
     response = app.get(
-        "/cog/crop/-56.228,72.715,-54.547,73.188.png?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256"
+        "/cog/bbox/-56.228,72.715,-54.547,73.188.png?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
@@ -355,7 +360,7 @@ def test_part(rio, app):
     assert meta["driver"] == "PNG"
 
     response = app.get(
-        "/cog/crop/-56.228,72.715,-54.547,73.188.jpg?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256&return_mask=false"
+        "/cog/bbox/-56.228,72.715,-54.547,73.188.jpg?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256&return_mask=false"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpg"
@@ -366,7 +371,7 @@ def test_part(rio, app):
     assert meta["driver"] == "JPEG"
 
     response = app.get(
-        "/cog/crop/-56.228,72.715,-54.547,73.188/128x128.png?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256"
+        "/cog/bbox/-56.228,72.715,-54.547,73.188/128x128.png?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
@@ -376,7 +381,7 @@ def test_part(rio, app):
     assert meta["driver"] == "PNG"
 
     response = app.get(
-        "/cog/crop/-56.228,72.715,-54.547,73.188.png?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256&width=512&height=512"
+        "/cog/bbox/-56.228,72.715,-54.547,73.188.png?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256&width=512&height=512"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
@@ -386,7 +391,7 @@ def test_part(rio, app):
     assert meta["driver"] == "PNG"
 
     response = app.get(
-        "/cog/crop/-56.228,72.715,-54.547,73.188.npy?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256"
+        "/cog/bbox/-56.228,72.715,-54.547,73.188.npy?url=https://myurl.com/cog.tif&rescale=0,1000&max_size=256"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/x-binary"

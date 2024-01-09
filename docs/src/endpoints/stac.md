@@ -16,24 +16,24 @@ The `/stac` routes are based on `titiler.core.factory.MultiBaseTilerFactory` but
 | `GET`  | `/stac/asset_statistics`                                             | JSON      | return per asset statistics
 | `GET`  | `/stac/statistics`                                                   | JSON      | return asset's statistics
 | `POST` | `/stac/statistics`                                                   | GeoJSON   | return asset's statistics for a GeoJSON
-| `GET`  | `/stac/tiles[/{TileMatrixSetId}]/{z}/{x}/{y}[@{scale}x][.{format}]`  | image/bin | create a web map tile image from assets
-| `GET`  | `/stac[/{TileMatrixSetId}]/tilejson.json`                            | JSON      | return a Mapbox TileJSON document
-| `GET`  | `/stac[/{TileMatrixSetId}]/WMTSCapabilities.xml`                       | XML       | return OGC WMTS Get Capabilities
+| `GET`  | `/stac/tiles[/{tileMatrixSetId}]/{z}/{x}/{y}[@{scale}x][.{format}]`  | image/bin | create a web map tile image from assets
+| `GET`  | `/stac[/{tileMatrixSetId}]/tilejson.json`                            | JSON      | return a Mapbox TileJSON document
+| `GET`  | `/stac[/{tileMatrixSetId}]/WMTSCapabilities.xml`                       | XML       | return OGC WMTS Get Capabilities
 | `GET`  | `/stac/point/{lon},{lat}`                                            | JSON      | return pixel value from assets
 | `GET`  | `/stac/preview[.{format}]`                                           | image/bin | create a preview image from assets
-| `GET`  | `/stac/crop/{minx},{miny},{maxx},{maxy}[/{width}x{height}].{format}` | image/bin | create an image from part of assets
-| `POST` | `/stac/crop[/{width}x{height}][].{format}]`                          | image/bin | create an image from a geojson covering the assets
-| `GET`  | `/stac[/{TileMatrixSetId}]/map`                                      | HTML      | simple map viewer
+| `GET`  | `/stac/bbox/{minx},{miny},{maxx},{maxy}[/{width}x{height}].{format}` | image/bin | create an image from part of assets
+| `POST` | `/stac/feature[/{width}x{height}][].{format}]`                          | image/bin | create an image from a geojson covering the assets
+| `GET`  | `/stac[/{tileMatrixSetId}]/map`                                      | HTML      | simple map viewer
 | `GET`  | `/stac/viewer`                                                       | HTML      | demo webpage (from `titiler.extensions.stacViewerExtension`)
 
 ## Description
 
 ### Tiles
 
-`:endpoint:/stac/tiles[/{TileMatrixSetId}]/{z}/{x}/{y}[@{scale}x][.{format}]`
+`:endpoint:/stac/tiles[/{tileMatrixSetId}]/{z}/{x}/{y}[@{scale}x][.{format}]`
 
 - PathParams:
-    - **TileMatrixSetId** (str): TileMatrixSet name, default is `WebMercatorQuad`. **Optional**
+    - **tileMatrixSetId** (str): TileMatrixSet name, default is `WebMercatorQuad`. **Optional**
     - **z** (int): TMS tile's zoom level.
     - **x** (int): TMS tile's column.
     - **y** (int): TMS tile's row.
@@ -48,13 +48,15 @@ The `/stac` routes are based on `titiler.core.factory.MultiBaseTilerFactory` but
     - **asset_bidx** (array[str]): Per asset band math expression (e.g `Asset1|1,2,3`).
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **reproject** (str): WarpKernel resampling algorithm (only used when doing re-projection). Defaults to `nearest`.
     - **rescale** (array[str]): Comma (',') delimited Min,Max range (e.g `rescale=0,1000`, `rescale=0,1000&rescale=0,3000&rescale=0,2000`).
     - **color_formula** (str): rio-color formula.
     - **colormap** (str): JSON encoded custom Colormap.
     - **colormap_name** (str): rio-tiler color map name.
     - **return_mask** (bool): Add mask to the output data. Default is True.
-    - **buffer** (float): Add buffer on each side of the tile (e.g 0.5 = 257x257, 1.0 = 258x258).
+    - **buffer** (float): Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).
+    - **padding** (int): Padding to apply to each tile edge. Helps reduce resampling artefacts along edges. Defaults to `0`.
     - **algorithm** (str): Custom algorithm name (e.g `hillshade`).
     - **algorithm_params** (str): JSON encoded algorithm parameters.
 
@@ -84,9 +86,11 @@ Example:
     - **max_size** (int): Max image size, default is 1024.
     - **height** (int): Force output image height.
     - **width** (int): Force output image width.
+    - **dst_crs** (str): Output Coordinate Reference System. Default to dataset's CRS.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **reproject** (str): WarpKernel resampling algorithm (only used when doing re-projection). Defaults to `nearest`.
     - **rescale** (array[str]): Comma (',') delimited Min,Max range (e.g `rescale=0,1000`, `rescale=0,1000&rescale=0,3000&rescale=0,2000`).
     - **color_formula** (str): rio-color formula.
     - **colormap** (str): JSON encoded custom Colormap.
@@ -106,11 +110,11 @@ Example:
 - `https://myendpoint/stac/preview.jpg?url=https://somewhere.com/item.json&assets=B01`
 - `https://myendpoint/stac/preview?url=https://somewhere.com/item.json&assets=B01&rescale=0,1000&colormap_name=cfastie`
 
-### Crop / Part
+### BBOX/Feature
 
-`:endpoint:/stac/crop/{minx},{miny},{maxx},{maxy}.{format}`
+`:endpoint:/stac/bbox/{minx},{miny},{maxx},{maxy}.{format}`
 
-`:endpoint:/stac/crop/{minx},{miny},{maxx},{maxy}/{width}x{height}.{format}`
+`:endpoint:/stac/bbox/{minx},{miny},{maxx},{maxy}/{width}x{height}.{format}`
 
 - PathParams:
     - **minx,miny,maxx,maxy** (str): Comma (',') delimited bounding box in WGS84.
@@ -124,11 +128,13 @@ Example:
     - **expression** (str): rio-tiler's math expression with asset names (e.g `Asset1_b1/Asset2_b1`).
     - **asset_as_band** (bool): tell rio-tiler that each asset is a 1 band dataset, so expression `Asset1/Asset2` can be passed.
     - **asset_bidx** (array[str]): Per asset band math expression (e.g `Asset1|1,2,3`).
-    - **coord-crs** (str): Coordinate Reference System of the input coordinates. Default to `epsg:4326`.
-    - **max_size** (int): Max image size, default is 1024.
+    - **coord_crs** (str): Coordinate Reference System of the input coordinates. Default to `epsg:4326`.
+    - **dst_crs** (str): Output Coordinate Reference System. Default to `coord_crs`.
+    - **max_size** (int): Max image size.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **reproject** (str): WarpKernel resampling algorithm (only used when doing re-projection). Defaults to `nearest`.
     - **rescale** (array[str]): Comma (',') delimited Min,Max range (e.g `rescale=0,1000`, `rescale=0,1000&rescale=0,3000&rescale=0,2000`).
     - **color_formula** (str): rio-color formula.
     - **colormap** (str): JSON encoded custom Colormap.
@@ -144,10 +150,10 @@ Example:
 
 Example:
 
-- `https://myendpoint/stac/crop/0,0,10,10.png?url=https://somewhere.com/item.json&assets=B01`
-- `https://myendpoint/stac/crop/0,0,10,10.png?url=https://somewhere.com/item.json&assets=B01&rescale=0,1000&colormap_name=cfastie`
+- `https://myendpoint/stac/bbox/0,0,10,10.png?url=https://somewhere.com/item.json&assets=B01`
+- `https://myendpoint/stac/bbox/0,0,10,10.png?url=https://somewhere.com/item.json&assets=B01&rescale=0,1000&colormap_name=cfastie`
 
-`:endpoint:/stac/crop[/{width}x{height}][].{format}] - [POST]`
+`:endpoint:/stac/feature[/{width}x{height}][].{format}] - [POST]`
 
 - Body:
     - **feature** (JSON): A valid GeoJSON feature (Polygon or MultiPolygon)
@@ -163,11 +169,13 @@ Example:
     - **expression** (str): rio-tiler's math expression with asset names (e.g `Asset1_b1/Asset2_b1`).
     - **asset_as_band** (bool): tell rio-tiler that each asset is a 1 band dataset, so expression `Asset1/Asset2` can be passed.
     - **asset_bidx** (array[str]): Per asset band math expression (e.g `Asset1|1,2,3`).
-    - **coord-crs** (str): Coordinate Reference System of the input geometry coordinates. Default to `epsg:4326`.
-    - **max_size** (int): Max image size, default is 1024.
+    - **coord_crs** (str): Coordinate Reference System of the input geometry coordinates. Default to `epsg:4326`.
+    - **dst_crs** (str): Output Coordinate Reference System. Default to `coord_crs`.
+    - **max_size** (int): Max image size.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **reproject** (str): WarpKernel resampling algorithm (only used when doing re-projection). Defaults to `nearest`.
     - **rescale** (array[str]): Comma (',') delimited Min,Max range (e.g `rescale=0,1000`, `rescale=0,1000&rescale=0,3000&rescale=0,2000`).
     - **color_formula** (str): rio-color formula.
     - **colormap** (str): JSON encoded custom Colormap.
@@ -183,9 +191,9 @@ Example:
 
 Example:
 
-- `https://myendpoint/stac/crop?url=https://somewhere.com/item.json&assets=B01`
-- `https://myendpoint/stac/crop.png?url=https://somewhere.com/item.json&assets=B01`
-- `https://myendpoint/stac/crop/100x100.png?url=https://somewhere.com/item.json&assets=B01&rescale=0,1000&colormap_name=cfastie`
+- `https://myendpoint/stac/feature?url=https://somewhere.com/item.json&assets=B01`
+- `https://myendpoint/stac/feature.png?url=https://somewhere.com/item.json&assets=B01`
+- `https://myendpoint/stac/feature/100x100.png?url=https://somewhere.com/item.json&assets=B01&rescale=0,1000&colormap_name=cfastie`
 
 ### Point
 
@@ -200,10 +208,10 @@ Example:
     - **expression** (str): rio-tiler's math expression with asset names (e.g `Asset1_b1/Asset2_b1`).
     - **asset_as_band** (bool): tell rio-tiler that each asset is a 1 band dataset, so expression `Asset1/Asset2` can be passed.
     - **asset_bidx** (array[str]): Per asset band math expression (e.g `Asset1|1,2,3`).
-    - **coord-crs** (str): Coordinate Reference System of the input coordinates. Default to `epsg:4326`.
+    - **coord_crs** (str): Coordinate Reference System of the input coordinates. Default to `epsg:4326`.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
 
 !!! important
     **assets** OR **expression** is required
@@ -214,10 +222,10 @@ Example:
 
 ### TilesJSON
 
-`:endpoint:/stac[/{TileMatrixSetId}]/tilejson.json` tileJSON document
+`:endpoint:/stac[/{tileMatrixSetId}]/tilejson.json` tileJSON document
 
 - PathParams:
-    - **TileMatrixSetId**: TileMatrixSet name, default is `WebMercatorQuad`.
+    - **tileMatrixSetId**: TileMatrixSet name, default is `WebMercatorQuad`.
 
 - QueryParams:
     - **url** (str): STAC Item URL. **Required**
@@ -231,13 +239,15 @@ Example:
     - **maxzoom** (int): Overwrite default maxzoom.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **reproject** (str): WarpKernel resampling algorithm (only used when doing re-projection). Defaults to `nearest`.
     - **rescale** (array[str]): Comma (',') delimited Min,Max range (e.g `rescale=0,1000`, `rescale=0,1000&rescale=0,3000&rescale=0,2000`).
     - **color_formula** (str): rio-color formula.
     - **colormap** (str): JSON encoded custom Colormap.
     - **colormap_name** (str): rio-tiler color map name.
     - **return_mask** (bool): Add mask to the output data. Default is True.
-    - **buffer** (float): Add buffer on each side of the tile (e.g 0.5 = 257x257, 1.0 = 258x258).
+    - **buffer** (float): Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).
+    - **padding** (int): Padding to apply to each tile edge. Helps reduce resampling artefacts along edges. Defaults to `0`.
     - **algorithm** (str): Custom algorithm name (e.g `hillshade`).
     - **algorithm_params** (str): JSON encoded algorithm parameters.
 
@@ -252,10 +262,10 @@ Example:
 
 ### Map
 
-`:endpoint:/stac[/{TileMatrixSetId}]/map`  Simple viewer
+`:endpoint:/stac[/{tileMatrixSetId}]/map`  Simple viewer
 
 - PathParams:
-    - **TileMatrixSetId**: TileMatrixSet name, default is `WebMercatorQuad`. **Optional**
+    - **tileMatrixSetId**: TileMatrixSet name, default is `WebMercatorQuad`. **Optional**
 
 - QueryParams:
     - **url** (str): STAC Item URL. **Required**
@@ -269,13 +279,15 @@ Example:
     - **maxzoom** (int): Overwrite default maxzoom.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **reproject** (str): WarpKernel resampling algorithm (only used when doing re-projection). Defaults to `nearest`.
     - **rescale** (array[str]): Comma (',') delimited Min,Max range (e.g `rescale=0,1000`, `rescale=0,1000&rescale=0,3000&rescale=0,2000`).
     - **color_formula** (str): rio-color formula.
     - **colormap** (str): JSON encoded custom Colormap.
     - **colormap_name** (str): rio-tiler color map name.
     - **return_mask** (bool): Add mask to the output data. Default is True.
-    - **buffer** (float): Add buffer on each side of the tile (e.g 0.5 = 257x257, 1.0 = 258x258).
+    - **buffer** (float): Buffer on each side of the given tile. It must be a multiple of `0.5`. Output **tilesize** will be expanded to `tilesize + 2 * buffer` (e.g 0.5 = 257x257, 1.0 = 258x258).
+    - **padding** (int): Padding to apply to each tile edge. Helps reduce resampling artefacts along edges. Defaults to `0`.
     - **algorithm** (str): Custom algorithm name (e.g `hillshade`).
     - **algorithm_params** (str): JSON encoded algorithm parameters.
 
@@ -344,7 +356,7 @@ Example:
     - **width** (int): Force image width from which to calculate statistics.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
     - **categorical** (bool): Return statistics for categorical dataset, default is false.
     - **c** (array[float]): Pixels values for categories.
     - **p** (array[int]): Percentile values.
@@ -369,7 +381,9 @@ Example:
     - **width** (int): Force image width from which to calculate statistics.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **algorithm** (str): Custom algorithm name (e.g `hillshade`).
+    - **algorithm_params** (str): JSON encoded algorithm parameters.
     - **categorical** (bool): Return statistics for categorical dataset, default is false.
     - **c** (array[float]): Pixels values for categories.
     - **p** (array[int]): Percentile values.
@@ -392,13 +406,17 @@ Example:
     - **expression** (str): rio-tiler's math expression with asset names (e.g `Asset1_b1/Asset2_b1`).
     - **asset_as_band** (bool): tell rio-tiler that each asset is a 1 band dataset, so expression `Asset1/Asset2` can be passed.
     - **asset_bidx** (array[str]): Per asset band math expression (e.g `Asset1|1,2,3`).
-    - **coord-crs** (str): Coordinate Reference System of the input geometry coordinates. Default to `epsg:4326`.
-    - **max_size** (int): Max image size from which to calculate statistics, default is 1024.
+    - **coord_crs** (str): Coordinate Reference System of the input geometry coordinates. Default to `epsg:4326`.
+    - **dst_crs** (str): Output Coordinate Reference System. Default to `coord_crs`.
+    - **max_size** (int): Max image size from which to calculate statistics.
     - **height** (int): Force image height from which to calculate statistics.
     - **width** (int): Force image width from which to calculate statistics.
     - **nodata** (str, int, float): Overwrite internal Nodata value.
     - **unscale** (bool): Apply dataset internal Scale/Offset.
-    - **resampling** (str): rasterio resampling method. Default is `nearest`.
+    - **resampling** (str): RasterIO resampling algorithm. Defaults to `nearest`.
+    - **reproject** (str): WarpKernel resampling algorithm (only used when doing re-projection). Defaults to `nearest`.
+    - **algorithm** (str): Custom algorithm name (e.g `hillshade`).
+    - **algorithm_params** (str): JSON encoded algorithm parameters.
     - **categorical** (bool): Return statistics for categorical dataset, default is false.
     - **c** (array[float]): Pixels values for categories.
     - **p** (array[int]): Percentile values.

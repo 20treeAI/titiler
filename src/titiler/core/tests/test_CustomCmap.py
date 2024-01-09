@@ -1,14 +1,13 @@
 """Test TiTiler Custom Colormap Params."""
 
-from enum import Enum
 from io import BytesIO
-from typing import Dict, Optional
 
 import numpy
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from rio_tiler.colormap import ColorMaps
 from starlette.testclient import TestClient
 
+from titiler.core.dependencies import create_colormap_dependency
 from titiler.core.factory import TilerFactory
 
 from .conftest import DATA_DIR
@@ -17,19 +16,8 @@ cmap_values = {
     "cmap1": {6: (4, 5, 6, 255)},
 }
 cmap = ColorMaps(data=cmap_values)
-ColorMapName = Enum(  # type: ignore
-    "ColorMapName", [(a, a) for a in sorted(cmap.list())]
-)
 
-
-def ColorMapParams(
-    colormap_name: ColorMapName = Query(None, description="Colormap name"),
-) -> Optional[Dict]:
-    """Colormap Dependency."""
-    if colormap_name:
-        return cmap.get(colormap_name.value)
-
-    return None
+ColorMapParams = create_colormap_dependency(cmap)
 
 
 def test_CustomCmap():

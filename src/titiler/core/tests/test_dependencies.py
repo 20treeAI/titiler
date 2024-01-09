@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 import pytest
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, Path
 from morecantile import tms
 from rio_tiler.types import ColorMapType
 from starlette.testclient import TestClient
+from typing_extensions import Annotated
 
 from titiler.core import dependencies, errors
 from titiler.core.resources.responses import JSONResponse
@@ -18,15 +19,20 @@ def test_tms():
     """Create App."""
     app = FastAPI()
 
-    @app.get("/web/{TileMatrixSetId}")
-    def web(TileMatrixSetId: Literal["WebMercatorQuad"] = Query(...)):
+    @app.get("/web/{tileMatrixSetId}")
+    def web(
+        tileMatrixSetId: Annotated[
+            Literal["WebMercatorQuad"],
+            Path(),
+        ],
+    ):
         """return tms id."""
-        return TileMatrixSetId
+        return tileMatrixSetId
 
-    @app.get("/all/{TileMatrixSetId}")
-    def all(TileMatrixSetId: Literal[tuple(tms.list())] = Query(...)):
+    @app.get("/all/{tileMatrixSetId}")
+    def all(tileMatrixSetId: Annotated[Literal[tuple(tms.list())], Path()]):
         """return tms id."""
-        return TileMatrixSetId
+        return tileMatrixSetId
 
     client = TestClient(app)
     response = client.get("/web/WebMercatorQuad")
@@ -34,7 +40,7 @@ def test_tms():
 
     response = client.get("/web/WorldCRS84Quad")
     assert response.status_code == 422
-    assert "permitted: 'WebMercatorQuad'" in response.json()["detail"][0]["msg"]
+    assert "Input should be 'WebMercatorQuad'" in response.json()["detail"][0]["msg"]
 
     response = client.get("/all/WebMercatorQuad")
     assert response.json() == "WebMercatorQuad"
@@ -60,7 +66,7 @@ def test_cmap():
     assert response.json()["1"] == [68, 2, 85, 255]
 
     cmap = json.dumps({1: [68, 1, 84, 255]})
-    response = client.get(f"/?colormap={cmap}")
+    response = client.get("/", params={"colormap": cmap})
     assert response.json()["1"] == [68, 1, 84, 255]
 
     cmap = json.dumps({0: "#000000", 255: "#ffffff"})
@@ -75,7 +81,7 @@ def test_cmap():
         ([3, 1000], [255, 0, 0, 255]),
     ]
     cmap = json.dumps(intervals)
-    response = client.get(f"/?colormap={cmap}")
+    response = client.get("/", params={"colormap": cmap})
     assert response.json()[0] == [[1, 2], [0, 0, 0, 255]]
     assert response.json()[1] == [[2, 3], [255, 255, 255, 255]]
     assert response.json()[2] == [[3, 1000], [255, 0, 0, 255]]
@@ -302,33 +308,58 @@ def test_bands():
     assert not response.json()["bands"]
 
 
-def test_image():
-    """test image deps."""
+def test_preview_part_params():
+    """test preview/part deps."""
 
     app = FastAPI()
 
-    @app.get("/")
-    def _endpoint(params=Depends(dependencies.ImageParams)):
+    @app.get("/preview")
+    def _endpoint(params=Depends(dependencies.PreviewParams)):
+        """return params."""
+        return params
+
+    @app.get("/part")
+    def _endpoint(params=Depends(dependencies.PartFeatureParams)):
         """return params."""
         return params
 
     client = TestClient(app)
-    response = client.get("/")
+    response = client.get("/preview")
     assert response.json()["max_size"] == 1024
     assert not response.json()["height"]
     assert not response.json()["width"]
 
-    response = client.get("/?max_size=2048")
+    response = client.get("/preview?max_size=2048")
     assert response.json()["max_size"] == 2048
     assert not response.json()["height"]
     assert not response.json()["width"]
 
-    response = client.get("/?width=128")
+    response = client.get("/preview?width=128")
     assert response.json()["max_size"] == 1024
     assert not response.json()["height"]
     assert response.json()["width"] == 128
 
-    response = client.get("/?width=128&height=128")
+    response = client.get("/preview?width=128&height=128")
+    assert not response.json()["max_size"]
+    assert response.json()["height"] == 128
+    assert response.json()["width"] == 128
+
+    response = client.get("/part")
+    assert not response.json()["max_size"]
+    assert not response.json()["height"]
+    assert not response.json()["width"]
+
+    response = client.get("/part?max_size=2048")
+    assert response.json()["max_size"] == 2048
+    assert not response.json()["height"]
+    assert not response.json()["width"]
+
+    response = client.get("/part?width=128")
+    assert not response.json()["max_size"]
+    assert not response.json()["height"]
+    assert response.json()["width"] == 128
+
+    response = client.get("/part?width=128&height=128")
     assert not response.json()["max_size"]
     assert response.json()["height"] == 128
     assert response.json()["width"] == 128
@@ -401,7 +432,7 @@ def test_algo():
     def _endpoint(algorithm=Depends(PostProcessParams)):
         """return params."""
         if algorithm:
-            return algorithm.dict()
+            return algorithm.model_dump()
         return {}
 
     client = TestClient(app)

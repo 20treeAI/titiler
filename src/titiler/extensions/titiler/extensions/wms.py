@@ -2,28 +2,30 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 import jinja2
 import numpy
 import rasterio
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException
 from rasterio.crs import CRS
+from rio_tiler.models import ImageData
 from rio_tiler.mosaic import mosaic_reader
 from rio_tiler.mosaic.methods.base import MosaicMethodBase
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.templating import Jinja2Templates
 
-from titiler.core.dependencies import RescalingParams
+from titiler.core.dependencies import ColorFormulaParams, RescalingParams
 from titiler.core.factory import BaseTilerFactory, FactoryExtension
 from titiler.core.resources.enums import ImageType, MediaType
+from titiler.core.utils import render_image
 
-DEFAULT_TEMPLATES = Jinja2Templates(
-    directory="",
-    loader=jinja2.ChoiceLoader([jinja2.PackageLoader(__package__, "templates")]),
-)  # type:ignore
+jinja2_env = jinja2.Environment(
+    loader=jinja2.ChoiceLoader([jinja2.PackageLoader(__package__, "templates")])
+)
+DEFAULT_TEMPLATES = Jinja2Templates(env=jinja2_env)
 
 
 class WMSMediaType(str, Enum):
@@ -37,19 +39,21 @@ class WMSMediaType(str, Enum):
     webp = "image/webp"
 
 
+@dataclass
 class OverlayMethod(MosaicMethodBase):
     """Overlay data on top."""
 
-    def feed(self, tile):
-        """Add data to tile."""
-        if self.tile is None:
-            self.tile = tile
+    def feed(self, array: numpy.ma.MaskedArray):
+        """Add data to the mosaic array."""
+        if self.mosaic is None:  # type: ignore
+            self.mosaic = array
 
-        pidex = self.tile.mask & ~tile.mask
+        else:
+            pidex = self.mosaic.mask & ~array.mask
 
-        mask = numpy.where(pidex, tile.mask, self.tile.mask)
-        self.tile = numpy.ma.where(pidex, tile, self.tile)
-        self.tile.mask = mask
+            mask = numpy.where(pidex, array.mask, self.mosaic.mask)
+            self.mosaic = numpy.ma.where(pidex, array, self.mosaic)
+            self.mosaic.mask = mask
 
 
 @dataclass
@@ -99,10 +103,7 @@ class wmsExtension(FactoryExtension):
                         "schema": {
                             "title": "Request name",
                             "type": "string",
-                            "enum": [
-                                "GetCapabilities",
-                                "GetMap",
-                            ],
+                            "enum": ["GetCapabilities", "GetMap", "GetFeatureInfo"],
                         },
                         "name": "REQUEST",
                         "in": "query",
@@ -145,6 +146,7 @@ class wmsExtension(FactoryExtension):
                             "title": "Output format of service metadata/map",
                             "type": "string",
                             "enum": [
+                                "text/html",
                                 "application/xml",
                                 "image/png",
                                 "image/jpeg",
@@ -199,6 +201,24 @@ class wmsExtension(FactoryExtension):
                             "type": "integer",
                         },
                         "name": "HEIGHT",
+                        "in": "query",
+                    },
+                    {
+                        "required": False,
+                        "schema": {
+                            "title": "I Coordinate in pixels of feature in Map CS.",
+                            "type": "integer",
+                        },
+                        "name": "i",
+                        "in": "query",
+                    },
+                    {
+                        "required": False,
+                        "schema": {
+                            "title": "J Coordinate in pixels of feature in Map CS.",
+                            "type": "integer",
+                        },
+                        "name": "j",
                         "in": "query",
                     },
                     # Non-Used
@@ -267,12 +287,8 @@ class wmsExtension(FactoryExtension):
             layer_params=Depends(factory.layer_dependency),
             dataset_params=Depends(factory.dataset_dependency),
             post_process=Depends(factory.process_dependency),
-            rescale: Optional[List[Tuple[float, ...]]] = Depends(RescalingParams),
-            color_formula: Optional[str] = Query(
-                None,
-                title="Color Formula",
-                description="rio-color formula (info: https://github.com/mapbox/rio-color)",
-            ),
+            rescale=Depends(RescalingParams),
+            color_formula=Depends(ColorFormulaParams),
             colormap=Depends(factory.colormap_dependency),
             reader_params=Depends(factory.reader_dependency),
             env=Depends(factory.environment_dependency),
@@ -365,7 +381,9 @@ class wmsExtension(FactoryExtension):
                             layers_dict[layer][
                                 "bounds_wgs84"
                             ] = src_dst.geographic_bounds
-                            layers_dict[layer]["abstract"] = src_dst.info().json()
+                            layers_dict[layer][
+                                "abstract"
+                            ] = src_dst.info().model_dump_json()
 
                 # Build information for the whole service
                 minx, miny, maxx, maxy = zip(
@@ -391,7 +409,11 @@ class wmsExtension(FactoryExtension):
                 )
 
             # GetMap: Return an image chip
-            if request_type.lower() == "getmap":
+            def get_map_data(  # noqa: C901
+                req: Dict,
+                req_keys: Set,
+                request_type: str,
+            ) -> Tuple[ImageData, Optional[str], bool]:
                 # Required parameters:
                 # - VERSION
                 # - REQUEST=GetMap,
@@ -404,23 +426,12 @@ class wmsExtension(FactoryExtension):
                 # - FORMAT
                 # Optional parameters: TRANSPARENT, BGCOLOR, EXCEPTIONS, TIME, ELEVATION, ...
 
-                # List of required parameters (styles and crs are excluded)
-                req_keys = {
-                    "version",
-                    "request",
-                    "layers",
-                    "bbox",
-                    "width",
-                    "height",
-                    "format",
-                }
-
                 intrs = set(req.keys()).intersection(req_keys)
                 missing_keys = req_keys.difference(intrs)
                 if len(missing_keys) > 0:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Missing 'GetMap' parameters: {missing_keys}",
+                        detail=f"Missing '{request_type}' parameters: {missing_keys}",
                     )
 
                 version = req["version"]
@@ -480,12 +491,13 @@ class wmsExtension(FactoryExtension):
                             detail=f"Invalid 'TRANSPARENT' parameter: {transparent}. Should be one of ['FALSE', 'TRUE'].",
                         )
 
-                if req["format"] not in self.supported_format:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid 'FORMAT' parameter: {req['format']}. Should be one of {self.supported_format}.",
-                    )
-                format = ImageType(WMSMediaType(req["format"]).name)
+                if format := req.get("format", None):
+                    if format not in self.supported_format:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid 'FORMAT' parameter: {format}. Should be one of {self.supported_format}.",
+                        )
+                    format = ImageType(WMSMediaType(format).name)
 
                 height, width = int(req["height"]), int(req["width"])
 
@@ -507,6 +519,21 @@ class wmsExtension(FactoryExtension):
                     _reader,
                     pixel_selection=OverlayMethod(),
                 )
+                return image, format, transparent
+
+            if request_type.lower() == "getmap":
+                # List of required parameters (styles and crs are excluded)
+                req_keys = {
+                    "version",
+                    "request",
+                    "layers",
+                    "bbox",
+                    "width",
+                    "height",
+                    "format",
+                }
+
+                image, format, transparent = get_map_data(req, req_keys, request_type)
 
                 if post_process:
                     image = post_process(image)
@@ -517,17 +544,52 @@ class wmsExtension(FactoryExtension):
                 if color_formula:
                     image.apply_color_formula(color_formula)
 
-                content = image.render(
-                    img_format=format.driver,
+                if colormap:
+                    image = image.apply_colormap(colormap)
+
+                content, media_type = render_image(
+                    image,
+                    output_format=format,
                     colormap=colormap,
                     add_mask=transparent,
-                    **format.profile,
                 )
-
-                return Response(content, media_type=format.mediatype)
+                return Response(content, media_type=media_type)
 
             elif request_type.lower() == "getfeatureinfo":
-                return Response("Not Implemented", 400)
+                # Required parameters:
+                # - VERSION
+                # - REQUEST=GetFeatureInfo
+                # - LAYERS
+                # - CRS or SRS
+                # - WIDTH
+                # - HEIGHT
+                # - QUERY_LAYERS
+                # - I (Pixel column)
+                # - J (Pixel row)
+                # Optional parameters: INFO_FORMAT, FEATURE_COUNT, ...
+
+                req_keys = {
+                    "version",
+                    "request",
+                    "layers",
+                    "width",
+                    "height",
+                    "query_layers",
+                    "i",
+                    "j",
+                }
+                image, _, _ = get_map_data(req, req_keys, request_type)
+                i = int(req["i"])
+                j = int(req["j"])
+
+                html_content = ""
+                bands_info = []
+                for band in range(image.count):
+                    pixel_value = image.data[band, j, i]
+                    bands_info.append(pixel_value)
+
+                html_content = ",".join([str(band_info) for band_info in bands_info])
+                return Response(html_content, 200)
 
             else:
                 raise HTTPException(

@@ -1,5 +1,284 @@
 # Release Notes
 
+## 0.16.1 (2024-01-08)
+
+### titiler.core
+
+* use morecantile `TileMatrixSet.cellSize` property instead of deprecated/private `TileMatrixSet._resolution` method
+
+### titiler.mosaic
+
+* use morecantile `TileMatrixSet.cellSize` property instead of deprecated/private `TileMatrixSet._resolution` method
+
+## 0.16.0 (2024-01-08)
+
+### titiler.core
+
+* update FastAPI version lower limit to `>=0.107.0`
+* fix template loading for starlette >= 0.28 by using `jinja2.Environment` argument (author @jasongi, https://github.com/developmentseed/titiler/pull/744)
+
+### titiler.extensions
+
+* fix template loading for starlette >= 0.28 by using `jinja2.Environment` argument (author @jasongi, https://github.com/developmentseed/titiler/pull/744)
+
+### titiler.application
+
+* fix template loading for starlette >= 0.28 by using `jinja2.Environment` argument (author @jasongi, https://github.com/developmentseed/titiler/pull/744)
+
+## 0.15.8 (2024-01-08)
+
+### titiler.core
+
+* use morecantile `TileMatrixSet.cellSize` property instead of deprecated/private `TileMatrixSet._resolution` method [backported from 0.16.1]
+
+### titiler.mosaic
+
+* use morecantile `TileMatrixSet.cellSize` property instead of deprecated/private `TileMatrixSet._resolution` method [backported from 0.16.1]
+
+## 0.15.7 (2024-01-08)
+
+### titiler.core
+
+* update FastAPI version upper limit to `<0.107.0` to avoid starlette breaking change (`0.28`)
+
+### titiler.application
+
+* add simple *auth* (optional) based on `global_access_token` string, set with `TITILER_API_GLOBAL_ACCESS_TOKEN` environment variable (author @DeflateAwning, https://github.com/developmentseed/titiler/pull/735)
+
+## 0.15.6 (2023-11-16)
+
+### titiler.core
+
+* in `/map` HTML response, add Lat/Lon buffer to AOI to avoid creating wrong AOI (when data covers the whole world).
+
+## 0.15.5 (2023-11-09)
+
+### titiler.core
+
+* add `algorithm` options for `/statistics` endpoints
+
+* switch from `BaseReader.statistics()` method to a combination of `BaseReader.preview()` and `ImageData.statistics()` methods to get the statistics
+
+## 0.15.4 (2023-11-06)
+
+### titiler.core
+
+* update `rio-tiler` requirement to `>=6.2.5,<7.0`
+
+* allow `bidx` option in `titiler.core.dependencies.AssetsBidxExprParams` and `titiler.core.dependencies.AssetsBidxParams`
+
+    ```python
+    # merge band 1 form asset1 and asset2
+    # before
+    httpx.get(
+        "/stac/preview",
+        params=(
+            ("url", "stac.json"),
+            ("assets", "asset1"),
+            ("assets", "asset2"),
+            ("asset_bidx", "asset1|1"),
+            ("asset_bidx", "asset2|1"),
+        )
+    )
+
+    # now
+    httpx.get(
+        "/stac/preview",
+        params=(
+            ("url", "stac.json"),
+            ("assets", "asset1"),
+            ("assets", "asset2"),
+            ("bidx", 1),
+        )
+    )
+    ```
+
+* fix openapi examples
+
+## 0.15.3 (2023-11-02)
+
+* add `dst_crs` options in `/statistics [POST]` and `/feature [POST]` endpoints
+
+## 0.15.2 (2023-10-23)
+
+### titiler.core
+
+* add `dependencies.TileParams` dependency with `buffer` and `padding` options
+* add `tile_dependency` attribute in `TilerFactory` class (defaults to `TileParams`)
+* add `reproject` (alias to `reproject_method`) option in `DatasetParams` dependency
+
+### titiler.mosaic
+
+*  Change `HTTP_404_NOT_FOUND` to `HTTP_204_NO_CONTENT` when no asset is found or tile is empty (author @simouel, https://github.com/developmentseed/titiler/pull/713)
+* add `tile_dependency` attribute in `MosaicTilerFactory` class (defaults to `TileParams`)
+
+### cdk application
+
+* Support non-root paths in AWS API Gateway Lambda handler (author @DanSchoppe, https://github.com/developmentseed/titiler/pull/716)
+
+## 0.15.1 (2023-10-17)
+
+* Allow a default `color_formula` parameter to be set via a dependency (author @samn, https://github.com/developmentseed/titiler/pull/707)
+* add `titiler.core.dependencies.create_colormap_dependency` to create ColorMapParams dependency from `rio_tiler.colormap.ColorMaps` object
+* add `py.typed` files in titiler submodules (https://peps.python.org/pep-0561)
+
+## 0.15.0 (2023-09-28)
+
+### titiler.core
+
+- added `PartFeatureParams` dependency
+
+**breaking changes**
+
+- `max_size` is now set to `None` for `/statistics [POST]`, `/bbox` and `/feature` endpoints, meaning the tiler will create image from the highest resolution.
+
+- renamed `titiler.core.dependencies.ImageParams` to `PreviewParams`
+
+- split TileFactory `img_dependency` attribute in two:
+  - `img_preview_dependency`: used in `/preview` and `/statistics [GET]`, default to `PreviewParams` (with `max_size=1024`)
+
+  - `img_part_dependency`: used in `/bbox`, `/feature` and `/statistics [POST]`, default to `PartFeatureParams` (with `max_size=None`)
+
+- renamed `/crop` endpoints to `/bbox/...` or `/feature/...`
+  - `/crop/{minx},{miny},{maxx},{maxy}.{format}` -> `/bbox/{minx},{miny},{maxx},{maxy}.{format}`
+
+  - `/crop/{minx},{miny},{maxx},{maxy}/{width}x{height}.{format}` -> `/bbox/{minx},{miny},{maxx},{maxy}/{width}x{height}.{format}`
+
+  - `/crop [POST]` -> `/feature [POST]`
+
+  - `/crop.{format} [POST]` -> `/feature.{format} [POST]`
+
+  - `/crop/{width}x{height}.{format}  [POST]` -> `/feature/{width}x{height}.{format} [POST]`
+
+- update `rio-tiler` requirement to `>=6.2.1`
+
+- Take coverage weights in account when generating statistics from GeoJSON features
+
+## 0.14.1 (2023-09-14)
+
+### titiler.extension
+
+* add `GetFeatureInfo` capability in `wmsExtension` (author @benjaminleighton, https://github.com/developmentseed/titiler/pull/698)
+
+## 0.14.0 (2023-08-30)
+
+### titiler.core
+
+* replace `-` by `_` in query parameters **breaking change**
+  - `coord-crs` -> `coord_crs`
+  - `dst-crs` -> `dst_crs`
+
+* replace `buffer` and `color_formula` endpoint parameters by external dependencies (`BufferParams` and `ColorFormulaParams`)
+
+* add `titiler.core.utils.render_image` which allow non-binary alpha band created with custom colormap. `render_image` replace `ImageData.render` method.
+
+    ```python
+    # before
+    if cmap := colormap or dst_colormap:
+        image = image.apply_colormap(cmap)
+
+    if not format:
+        format = ImageType.jpeg if image.mask.all() else ImageType.png
+
+    content = image.render(
+        img_format=format.driver,
+        **format.profile,
+        **render_params,
+    )
+
+    # now
+    # render_image will:
+    # - apply the colormap
+    # - choose the right output format if `None`
+    # - create the binary data
+    content, media_type = render_image(
+        image,
+        output_format=format,
+        colormap=colormap or dst_colormap,
+        **render_params,
+    )
+    ```
+
+### titiler.extension
+
+* rename `geom-densify-pts` to `geometry_densify` **breaking change**
+* rename `geom-precision` to `geometry_precision` **breaking change**
+
+## 0.13.3 (2023-08-27)
+
+* fix Factories `url_for` method and avoid changing `Request.path_params` object
+
+## 0.13.2 (2023-08-24)
+
+### titiler.extensions
+
+* replace mapbox-gl by maplibre
+* replace Stamen by OpenStreetMap tiles
+* simplify band selection handling (author @tayden, https://github.com/developmentseed/titiler/pull/688)
+
+## 0.13.1 (2023-08-21)
+
+### titiler.core
+
+* fix `LowerCaseQueryStringMiddleware` unexpectedly truncating query parameters (authors @jthetzel and @jackharrhy, @https://github.com/developmentseed/titiler/pull/677)
+
+## titiler.application
+
+* add `cors_allow_methods` in `ApiSettings` to control the CORS allowed methods (author @ubi15, https://github.com/developmentseed/titiler/pull/684)
+
+## 0.13.0 (2023-07-27)
+
+* update core requirements to libraries using pydantic **~=2.0**
+
+### titiler.core
+
+* update requirements:
+  * fastapi `>=0.95.1` --> `>=0.100.0`
+  * pydantic `~=1.0` --> `~=2.0`
+  * rio-tiler `>=5.0,<6.0` --> `>=6.0,<7.0`
+  * morecantile`>=4.3,<5.0` --> `>=5.0,<6.0`
+  * geojson-pydantic `>=0.4,<0.7` --> `>=1.0,<2.0`
+  * typing_extensions `>=4.6.1`
+
+### titiler.extension
+
+* update requirements:
+  * rio-cogeo `>=4.0,<5.0"` --> `>=5.0,<6.0"`
+
+### titiler.mosaic
+
+* update requirements:
+  * cogeo-mosaic `>=6.0,<7.0` --> `>=7.0,<8.0`
+
+### titiler.application
+
+* use `/api` and `/api.html` for documentation (instead of `/openapi.json` and `/docs`)
+* update landing page
+
+## 0.12.0 (2023-07-17)
+
+* use `Annotated` Type for Query/Path parameters
+* replace variable `TileMatrixSetId` by `tileMatrixSetId`
+
+### titiler.core
+
+* update FastAPI dependency to `>=0.95.1`
+* set `pydantic` dependency to `~=1.0`
+* update `rio-tiler` dependency to `>=5.0,<6.0`
+* update TMS endpoints to match OGC Tiles specification
+
+### titiler.extensions
+
+* use TiTiler's custom JSONResponse for the `/validate` endpoint to avoid issue when COG has `NaN` nodata value
+* update `rio-cogeo` dependency to `>=4.0,<5.0`
+* update `rio-stac` requirement to `>=0.8,<0.9` and add `geom-densify-pts` and `geom-precision` options
+
+## titiler.mosaic
+
+* update `cogeo-mosaic` dependency to `>=6.0,<7.0`
+* remove `titiler.mosaic.resources.enum.PixelSelectionMethod` and use `rio_tiler.mosaic.methods.PixelSelectionMethod`
+* allow more TileMatrixSet (than only `WebMercatorQuad`)
+
 ## 0.11.7 (2023-05-18)
 
 ### titiler.core
